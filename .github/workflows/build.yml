@@ -92,11 +92,13 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      # macOS dual-arch DMG (x64 + arm64). electron-builder.yml's `mac.target`
-      # already declares both arches; let it handle the matrix rather than
-      # forcing --universal which clashes with the per-arch artifactName.
-      - name: Build Electron (macOS DMG, unsigned)
-        run: npx electron-builder --mac dmg
+      # macOS dual-arch DMG (x64 + arm64). electron-builder.yml's
+      # `mac.target` declares both arches, BUT on macos-latest (Apple
+      # Silicon runner) the CLI defaults to host-arch only unless
+      # --x64 --arm64 are passed explicitly. Without those flags the
+      # v1.0.0 build only produced arm64 — Intel Mac users were stuck.
+      - name: Build Electron (macOS DMG, unsigned, dual-arch)
+        run: npx electron-builder --mac dmg --x64 --arm64
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
