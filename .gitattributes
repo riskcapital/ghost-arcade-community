@@ -1,0 +1,47 @@
+# Normalize line endings across platforms.
+# Source files are LF — Windows checkouts get LF on disk too (no CRLF
+# noise in `git diff` for cross-platform contributors). Shell scripts
+# are explicitly LF; batch + powershell are explicitly CRLF.
+
+* text=auto eol=lf
+
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.icns      binary
+*.webp      binary
+*.mp4       binary
+*.webm      binary
+*.mov       binary
+*.mp3       binary
+*.wav       binary
+*.ogg       binary
+*.flac      binary
+*.glb       binary
+*.gltf      binary
+*.fbx       binary
+*.ply       binary
+*.splat     binary
+*.zip       binary
+*.tar       binary
+*.gz        binary
+*.7z        binary
+*.dmg       binary
+*.exe       binary
+*.AppImage  binary
+
+# Markdown / shaders / configs are explicitly text so git renders diffs.
+*.md        text
+*.fs        text
+*.vs        text
+*.glsl      text
+*.json      text
+*.yml       text
+*.yaml      text
+*.toml      text

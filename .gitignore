@@ -1,0 +1,30 @@
+# Build output
+node_modules/
+dist/
+dist-electron/
+dist-electron-*/
+.vite/
+
+# Logs + OS cruft
+*.log
+.DS_Store
+Thumbs.db
+electron-debug.log
+ghost-arcade-community-debug.log
+
+# Local env / secrets — community build doesn't need any, but guard anyway
+.env
+.env.local
+*.secret
+*.secrets
+
+# IDE
+.vscode/
+.idea/
+
+# Editor swap files
+*.swp
+*.swo
+
+# Apple notarization staging
+build/

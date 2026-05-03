@@ -1,0 +1,27 @@
+{
+  "name": "Ghost Arcade Community — VJ Controller",
+  "short_name": "Ghost Arcade",
+  "description": "Open-source VJ Controller & Projection Mapping Remote",
+  "start_url": "/#/mobile",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0a0a0c",
+  "theme_color": "#0a0a0c",
+  "scope": "/",
+  "categories": ["entertainment", "music"],
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "prefer_related_applications": false
+}

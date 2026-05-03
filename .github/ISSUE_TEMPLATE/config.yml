@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Pro edition support
+    url: https://ghostarcade.live
+    about: Issues with Spout/Syphon, AI generation, dual-deck VJ, snapshots, macros, setlists, plugins, or licensing — those are Pro features and not part of this repo.
+  - name: General questions
+    url: https://github.com/riskcapital/ghost-arcade-community/discussions
+    about: For "how do I do X" questions, please use Discussions instead of opening an issue.
+  - name: Security vulnerabilities
+    url: https://github.com/riskcapital/ghost-arcade-community/security/advisories/new
+    about: Please report security issues privately via the GitHub security advisory channel — not as public issues.

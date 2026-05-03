@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest an improvement or new feature
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature.
+
+        Before opening: features that exist in the Pro edition (Spout/Syphon
+        texture sharing, AI generation, dual-deck VJ, macros/snapshots/setlists,
+        plugin system, keyframes) are out of scope for the Community Edition.
+        See the README's "What's different from Pro" table.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the use case before describing the feature.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would this feature work? UI mockups welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Are there workarounds today? Why aren't they good enough?
+
+  - type: checkboxes
+    id: contributing
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd be willing to submit a PR for this
+        - label: I'd be willing to help test
