@@ -280,7 +280,7 @@ export function createDefaultSlice(id: string, name: string, spoutSuffix: string
     cropY: 0,
     cropW,
     cropH: 1,
-    spoutName: `illVisuals-${spoutSuffix}`,
+    spoutName: `ghostArcade-${spoutSuffix}`,
     edgeBlendLeft: 0,
     edgeBlendRight: 0,
     edgeBlendTop: 0,
@@ -397,7 +397,7 @@ function createDefaultSettings(): AppSettings {
     },
     output: {
       spoutEnabled: false,
-      spoutName: 'illVisuals',
+      spoutName: 'ghostArcade',
       spoutResolution: 'match' as const,
       customWidth: 1920,
       customHeight: 1080,

@@ -131,7 +131,7 @@ The following are commercial features available only in the Pro edition
 - `00-refikky.fs` → `00-data-flow.fs` (same)
 - All `Premium X` effect categories → `Advanced X` (no tier system)
 - All logo references → `/logo.png` (was scattered between
-  `illVisualsLogo.png`, `ShrinkWrapLogo.png`, etc.)
+  `logo.png`, `logo.png`, etc.)
 
 ### Known issues
 
