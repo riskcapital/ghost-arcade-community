@@ -64,7 +64,12 @@ jobs:
         run: npm run build
 
       - name: Build Electron (Windows NSIS, unsigned)
-        run: npx electron-builder --win nsis
+        # --publish never: this repo IS the release host (no cross-repo
+        # split like Pro), but the upload to GitHub Releases is handled
+        # by softprops/action-gh-release below. Preventing electron-builder
+        # from also auto-publishing avoids the two-uploader race that
+        # caused 502 Bad Gateway loops on Pro v0.5.5 macOS.
+        run: npx electron-builder --win nsis --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -98,7 +103,7 @@ jobs:
       # --x64 --arm64 are passed explicitly. Without those flags the
       # v1.0.0 build only produced arm64 — Intel Mac users were stuck.
       - name: Build Electron (macOS DMG, unsigned, dual-arch)
-        run: npx electron-builder --mac dmg --x64 --arm64
+        run: npx electron-builder --mac dmg --x64 --arm64 --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -127,7 +132,7 @@ jobs:
         run: npm run build
 
       - name: Build Electron (Linux AppImage)
-        run: npx electron-builder --linux AppImage
+        run: npx electron-builder --linux AppImage --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
