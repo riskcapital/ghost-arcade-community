@@ -249,10 +249,11 @@ export class RenderEngine {
   }
 
   // ─── Watermark System ─────────────────────────────────────────────────────
-  // Roaming logo watermark: icon-shrink.jpg appears at a random position,
-  // stays visible for a few seconds, fades out, disappears for a few seconds,
-  // then reappears at a new random position. Rendered in "screen" blend mode
-  // so it overlays everything including recordings.
+  // Inherited from the Pro codebase. In the Community edition this code path
+  // is never activated (no license tier system → setWatermark is never called
+  // with `true`), but we keep the texture path correct so future tooling that
+  // initializes the renderer doesn't see a 404 on /icon-shrink.png (a stale
+  // ill Visuals brand file that no longer ships).
 
   /** Enable or disable the watermark overlay (controlled by license store) */
   setWatermark(enabled: boolean): void {
@@ -270,7 +271,7 @@ export class RenderEngine {
     if (!_watermarkTextureCache) {
       const loader = new THREE.TextureLoader();
       _watermarkTextureCache = loader.load(
-        './icon-shrink.png',
+        './logo.png',
         () => { console.log('[Watermark] Logo texture loaded successfully (cached)'); },
         undefined,
         (err) => { console.error('[Watermark] Failed to load logo texture:', err); }
