@@ -10,6 +10,15 @@ import type {
   LightPaintingLoopMode,
 } from '../types';
 
+// Local-midnight wall-clock anchor used to derive `animationTime` from
+// Date.now(). Any process on the same machine computes the same value, so
+// renderer instances in the main viewport and the output window stay in
+// lock-step instead of drifting based on when each was constructed.
+const LP_TIME_ANCHOR_MS = (() => {
+  const d = new Date();
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+})();
+
 export class LightPaintingRenderer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -828,10 +837,27 @@ export class LightPaintingRenderer {
    * Returns a Three.js texture suitable for compositing
    */
   render(content: LightPaintingContent, deltaTime: number): THREE.Texture {
-    // Update animation time
+    // Update animation time — derived from a globally-shared wall clock so
+    // the main viewport and the output window converge on the SAME value at
+    // any given wall-clock moment. Previously each renderer self-incremented
+    // an animationTime accumulator from its own deltaTime, which drifted:
+    // the output window opens later, so its accumulator is always behind,
+    // and even when both are running they tick at slightly different rates
+    // depending on frame load.
+    //
+    // We anchor at today's local midnight (a stable per-day value identical
+    // in every process on the machine) so the elapsed milliseconds are a
+    // reasonable size for FP math.
+    //
+    // Pause: when content.isPlaying flips false we leave animationTime at
+    // its last value. On resume it jumps to the current wall-clock value —
+    // continuity across pauses is sacrificed in exchange for guaranteed
+    // sync between the two windows. (No UI currently surfaces pause/resume
+    // for light-painting playback, so this trade-off is invisible today.)
     if (content.isPlaying) {
-      this.animationTime += deltaTime * 1000 * content.animationSpeed;
+      this.animationTime = (Date.now() - LP_TIME_ANCHOR_MS) * content.animationSpeed;
     }
+    void deltaTime;
 
     // Calculate total duration
     this.totalDuration = this.calculateTotalDuration(content);

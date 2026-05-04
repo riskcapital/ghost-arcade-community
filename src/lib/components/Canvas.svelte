@@ -49,6 +49,31 @@
   // Output post-processing (reactive)
   $: outputFilterCSS = getOutputFilterCSS($settings.output);
 
+  // ── Output-window display transforms (rotation + crop) ────────────────────
+  // Applied via CSS only when this Canvas is rendering the output window
+  // (isOutputMode). In editor mode they're a no-op so the user always sees
+  // the un-transformed source while editing. Pure GPU compositor work — no
+  // shader cost, no extra texture upload.
+  $: outputRotationDeg = isOutputMode ? ($settings.output.outputRotation ?? 0) : 0;
+  $: outputCropX = isOutputMode ? ($settings.output.outputCropX ?? 0) : 0;
+  $: outputCropY = isOutputMode ? ($settings.output.outputCropY ?? 0) : 0;
+  $: outputCropW = isOutputMode ? ($settings.output.outputCropWidth ?? 1) : 1;
+  $: outputCropH = isOutputMode ? ($settings.output.outputCropHeight ?? 1) : 1;
+  $: outputCropActive = isOutputMode && (outputCropX > 0 || outputCropY > 0 || outputCropW < 1 || outputCropH < 1);
+  // clip-path crops, then a transform scales the kept region back to fill
+  // the window so the projector still gets a full-screen image. Translate
+  // first so the scale origin matches the kept region's top-left corner.
+  $: outputCropClipPath = outputCropActive
+    ? `inset(${outputCropY * 100}% ${(1 - outputCropX - outputCropW) * 100}% ${(1 - outputCropY - outputCropH) * 100}% ${outputCropX * 100}%)`
+    : 'none';
+  $: outputCropTransform = outputCropActive
+    ? `translate(${(-outputCropX / outputCropW) * 100}%, ${(-outputCropY / outputCropH) * 100}%) scale(${1 / outputCropW}, ${1 / outputCropH})`
+    : '';
+  $: outputRotationTransform = outputRotationDeg !== 0 ? `rotate(${outputRotationDeg}deg)` : '';
+  // Combine: rotation goes outermost (rotates the cropped frame),
+  // then crop scale pushes the kept region to fill.
+  $: outputCanvasTransform = [outputRotationTransform, outputCropTransform].filter(Boolean).join(' ');
+
   // Redraw overlay when test pattern / edge blend settings change
   $: if (outputOverlayCanvas) {
     updateOutputOverlay(
@@ -748,6 +773,27 @@
       canvas.removeEventListener('mouseenter', handleCanvasMouseEnter);
     };
   });
+
+  // ── Engine layer cleanup ──────────────────────────────────────────────────
+  // The engine accumulates a per-layer GPU resource bundle (RT, geometry,
+  // material) in its `layerObjects` Map. Nothing was telling the engine
+  // when a layer disappeared from the project (delete, undo-add, redo-delete),
+  // so resources leaked. Worse: after an undo/redo round-trip a stale
+  // layerObject for a removed layer could still get touched by the render
+  // path (because Map iteration order doesn't follow project.layers), which
+  // matched the user-reported "redo bricks the app" symptom on light-painting
+  // layers. This reactive sweep walks the engine's known layer IDs each
+  // project tick and tears down any that are no longer present.
+  let _knownLayerIds = new Set<string>();
+  $: if (engine && $project) {
+    const liveIds = new Set($project.layers.map(l => l.id));
+    for (const id of _knownLayerIds) {
+      if (!liveIds.has(id)) {
+        try { engine.removeLayer(id); } catch (e) { console.warn('[Canvas] engine.removeLayer failed for', id, e); }
+      }
+    }
+    _knownLayerIds = liveIds;
+  }
 
   // Re-resize engine when project dimensions change (e.g., user picks 4K in settings)
   $: if (engine && $project.width && $project.height) {
@@ -2659,9 +2705,15 @@
     bind:this={containerEl}
   >
     <canvas class="main-canvas" bind:this={canvas}
-      style:filter={outputFilterCSS !== 'none' ? outputFilterCSS : null}></canvas>
-    <!-- Edge blend + test pattern overlay -->
-    <canvas class="output-overlay" bind:this={outputOverlayCanvas}></canvas>
+      style:filter={outputFilterCSS !== 'none' ? outputFilterCSS : null}
+      style:transform={outputCanvasTransform || null}
+      style:clip-path={outputCropClipPath !== 'none' ? outputCropClipPath : null}
+      style:transform-origin={outputCropActive ? '0 0' : 'center'}></canvas>
+    <!-- Edge blend + test pattern overlay (rotates + crops with the main canvas) -->
+    <canvas class="output-overlay" bind:this={outputOverlayCanvas}
+      style:transform={outputCanvasTransform || null}
+      style:clip-path={outputCropClipPath !== 'none' ? outputCropClipPath : null}
+      style:transform-origin={outputCropActive ? '0 0' : 'center'}></canvas>
     {#if $settings.output.blackout}
       <div class="blackout-overlay"></div>
     {/if}

@@ -292,6 +292,40 @@ function registerIpcHandlers() {
       primary: d.id === screen.getPrimaryDisplay().id,
     }));
   });
+  // Returns the NATIVE pixel resolution of the display the output window is
+  // currently on (or the would-be target if no output window is open yet).
+  // Used by the "Match Resolution" button — sets the project canvas to the
+  // exact pixel dimensions of the projector / external monitor so there's
+  // zero scaling between source and final output.
+  ipcMain.handle('get_output_display_info', () => {
+    const primary = screen.getPrimaryDisplay();
+    let target;
+    let isExternal = false;
+    if (outputWindow && !outputWindow.isDestroyed()) {
+      const bounds = outputWindow.getBounds();
+      // Find the display whose bounds contain the window's centre.
+      const cx = bounds.x + bounds.width / 2;
+      const cy = bounds.y + bounds.height / 2;
+      target = screen.getDisplayNearestPoint({ x: Math.round(cx), y: Math.round(cy) });
+    } else {
+      // Pick the first non-primary display, fall back to primary.
+      target = screen.getAllDisplays().find(d => d.id !== primary.id) || primary;
+    }
+    isExternal = target.id !== primary.id;
+    // Native pixel resolution = logical bounds × scaleFactor (Retina/HiDPI).
+    const nativeW = Math.round(target.bounds.width * target.scaleFactor);
+    const nativeH = Math.round(target.bounds.height * target.scaleFactor);
+    return {
+      displayId: target.id,
+      label: target.label || (isExternal ? 'External display' : 'Primary display'),
+      isExternal,
+      logicalWidth: target.bounds.width,
+      logicalHeight: target.bounds.height,
+      scaleFactor: target.scaleFactor,
+      nativeWidth: nativeW,
+      nativeHeight: nativeH,
+    };
+  });
   ipcMain.handle('create_output_window', (_, args) => createOutputWindow(args));
   ipcMain.handle('close_output_window', () => {
     if (outputWindow && !outputWindow.isDestroyed()) outputWindow.close();
@@ -299,15 +333,51 @@ function registerIpcHandlers() {
     return { ok: true };
   });
   ipcMain.handle('output_fullscreen_external', () => {
-    if (!outputWindow || outputWindow.isDestroyed()) return { ok: false };
+    // If no output window is open yet, CREATE one in fullscreen on the
+    // first non-primary display (or the primary if no external display is
+    // attached). Previously this returned silently when no window existed,
+    // forcing the user to manually open a windowed output and drag it onto
+    // the projector — exactly the workaround the Fullscreen button is
+    // supposed to eliminate.
+    if (!outputWindow || outputWindow.isDestroyed()) {
+      const primary = screen.getPrimaryDisplay();
+      const all = screen.getAllDisplays();
+      const target = all.find(d => d.id !== primary.id) || primary;
+      const isExternal = target.id !== primary.id;
+      createOutputWindow({
+        width: target.bounds.width,
+        height: target.bounds.height,
+        x: target.bounds.x,
+        y: target.bounds.y,
+        fullscreen: true,
+        displayId: target.id,
+      });
+      return { ok: true, displayId: target.id, isExternal, created: true };
+    }
     outputWindow.setFullScreen(true);
-    return { ok: true };
+    return { ok: true, displayId: null, isExternal: false, created: false };
   });
   ipcMain.handle('output_toggle_fullscreen', () => {
-    if (!outputWindow || outputWindow.isDestroyed()) return { ok: false, fullscreen: false };
+    // Same fix as output_fullscreen_external: if no window exists, treat
+    // toggle-on as "open fullscreen on external" so the button always does
+    // SOMETHING visible. Toggle-off without a window is just a no-op.
+    if (!outputWindow || outputWindow.isDestroyed()) {
+      const primary = screen.getPrimaryDisplay();
+      const all = screen.getAllDisplays();
+      const target = all.find(d => d.id !== primary.id) || primary;
+      createOutputWindow({
+        width: target.bounds.width,
+        height: target.bounds.height,
+        x: target.bounds.x,
+        y: target.bounds.y,
+        fullscreen: true,
+        displayId: target.id,
+      });
+      return { ok: true, fullscreen: true, created: true };
+    }
     const next = !outputWindow.isFullScreen();
     outputWindow.setFullScreen(next);
-    return { ok: true, fullscreen: next };
+    return { ok: true, fullscreen: next, created: false };
   });
   ipcMain.handle('output_set_cursor', (_e, show) => {
     if (!outputWindow || outputWindow.isDestroyed()) return { ok: false };
