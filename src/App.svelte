@@ -511,15 +511,13 @@
     window.addEventListener('unhandledrejection', onRejection);
 
     // License init is a no-op in OSS (the stub returns immediately); kept
-    // for symmetry with the Pro codebase. Welcome modal shows on first
-    // run, then auto-loads the demo project so the user sees something.
+    // for symmetry with the Pro codebase. Welcome modal shows on first run.
+    // Demo auto-import was removed — no bundled demo ships in Community
+    // until the standalone demo zip is published. New users land on an
+    // empty composition and add their first layer manually.
     initLicense().then(() => {
       const welcomeSeen = localStorage.getItem('ghostarcade-welcome-seen');
-      if (!welcomeSeen) {
-        showWelcome = true;
-      } else {
-        maybeAutoLoadDemo();
-      }
+      if (!welcomeSeen) showWelcome = true;
     }).catch(e => console.warn('[License] Init error:', e));
 
     // Updater removed in OSS — updates flow through GitHub releases /
@@ -2591,83 +2589,12 @@
     history.record(get(project));
   }
 
-  // ─── Load Demo Project ───────────────────────────────────────────────
-  let demoLoading = false;
-  let demoProgress = 0;
-
-  // First-launch demo auto-import — DISABLED in OSS until a community
-  // demo bundle is published to the public releases repo. The Pro version
-  // shipped a 100MB+ asset bundle (videos / 3D models / shaders) that was
-  // hosted on a private GitHub Releases asset; the OSS demo bundle hasn't
-  // been authored yet. Users can still trigger File → Load Demo Project
-  // manually, which will surface the network error gracefully.
-  // Mark as "imported" so we never auto-trigger.
-  function maybeAutoLoadDemo() {
-    if (!isDesktopApp) return;
-    localStorage.setItem('ghostarcade-first-demo-imported', new Date().toISOString());
-    // Intentionally no download — empty composition is a valid first-run state.
-  }
-
-  async function loadDemoProject(opts: { silent?: boolean } = {}) {
-    const silent = opts.silent === true;
-    fileMenuOpen = false;
-
-    if (!isDesktopApp) {
-      // Browser build can't write to disk — point users at the GitHub releases
-      // page where the demo bundle is hosted. Forks should override this URL.
-      window.open('https://github.com/riskcapital/ghost-arcade-community/releases', '_blank');
-      return;
-    }
-
-    demoLoading = true;
-    demoProgress = 0;
-
-    try {
-      // Listen for download progress
-      const progressHandler = (_event: any, data: { percent: number }) => {
-        demoProgress = data.percent;
-      };
-      if ((window as any).electronAPI?.on) {
-        (window as any).electronAPI.on('demo-download-progress', progressHandler);
-      }
-
-      console.log('[Demo] Downloading demo project...');
-
-      const result = await invoke<{ projectDir: string; projectJSON: string; alreadyExists: boolean }>('download_demo_zip', {
-        // Hosted on GitHub Releases (>100MB so can't live in the marketing
-        // site's public/ directly — GitHub repo file size limit). Stable
-        // URL, no bandwidth charged to Vercel, served from GitHub's CDN.
-        url: 'https://github.com/riskcapital/ghost-arcade-releases/releases/download/demo-assets/ghost-arcade-demo.zip',
-      });
-
-      if (result.alreadyExists) {
-        console.log('[Demo] Demo already downloaded, loading...');
-      }
-
-      // Clear stale performer / session / runtime caches before loading so
-      // older demo files can't carry legacy clip bindings into the new build.
-      try { synthVisionStore.reset(); } catch {}
-      try { sessionClipCache.clear(); } catch {}
-      try { isfShaderCache.clear(); } catch {}
-      try { modulationStore.clearAll(); } catch {}
-
-      // Import the project with directory for relative path resolution
-      const success = project.importProjectJSON(result.projectJSON, result.projectDir);
-
-      if (success) {
-        markAsSaved();
-        console.log('[Demo] Demo project loaded successfully!');
-      } else if (!silent) {
-        alert('Failed to import demo project. The file may be corrupted.');
-      }
-    } catch (err: any) {
-      console.error('[Demo] Failed to load demo project:', err);
-      if (!silent) alert(`Demo download failed: ${err.message || err}`);
-    } finally {
-      demoLoading = false;
-      demoProgress = 0;
-    }
-  }
+  // Demo project loading was removed in v1.0.8. The hosted demo zip
+  // hasn't been authored yet; auto-import + the File → Load Demo entry
+  // and the download progress overlay are all gone until we publish a
+  // standalone demo bundle alongside a release. Once the bundle exists
+  // we'll restore a "Load Demo Project" entry that simply opens the
+  // GitHub release page — no in-app download, no progress UI.
 
   function handleUndo() {
     fileMenuOpen = false;
@@ -3242,17 +3169,6 @@
                   </svg>
                 </span>
                 <span class="menu-label">Export Presets...</span>
-              </button>
-              <div class="menu-separator"></div>
-              <button class="menu-item" onclick={() => loadDemoProject()} disabled={demoLoading}>
-                <span class="menu-icon">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                    <polyline points="7 10 12 15 17 10"></polyline>
-                    <line x1="12" y1="15" x2="12" y2="3"></line>
-                  </svg>
-                </span>
-                <span class="menu-label">{demoLoading ? `Downloading ${demoProgress}%...` : 'Load Demo Project'}</span>
               </button>
               <div class="menu-separator"></div>
               <button class="menu-item" onclick={handleUndo} disabled={!$canUndo}>
@@ -4256,7 +4172,6 @@
         else if (action === 'save') saveComposition();
         else if (action === 'saveAs') saveCompositionAs();
         else if (action === 'importPresets') importPresetsFromFile();
-        else if (action === 'loadDemo') loadDemoProject();
         else if (action === 'undo') handleUndo();
         else if (action === 'redo') handleRedo();
       }}
@@ -4278,30 +4193,12 @@
       <WelcomeModal onClose={() => {
         showWelcome = false;
         localStorage.setItem('ghostarcade-welcome-seen', 'true');
-        // Welcome was the gate — kick off demo download once dismissed
-        maybeAutoLoadDemo();
       }} />
     {/if}
 
     <!-- Update modal removed in OSS — updates flow through the user's
          package manager / GitHub releases. No in-app installer. -->
 
-
-    <!-- Demo download progress overlay — shown whenever loadDemoProject()
-         is in flight, regardless of trigger source (auto-import or File menu).
-         Indeterminate spinner instead of a percentage bar — GitHub asset
-         downloads complete fast enough that the percentage often stayed at
-         0 until the whole transfer finished, looking stuck. -->
-    {#if demoLoading}
-      <div class="demo-loading-overlay">
-        <div class="demo-loading-card">
-          <div class="demo-spinner" aria-hidden="true"></div>
-          <h2>Loading demo project</h2>
-          <p class="demo-loading-subtitle">Downloading sample composition + media (~107 MB)</p>
-          <p class="demo-progress-hint">First-launch download — won't happen again</p>
-        </div>
-      </div>
-    {/if}
 
     <!-- Settings Panel — output transforms now read from $settings.output -->
     <SettingsPanel
@@ -6476,63 +6373,8 @@
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
   }
 
-  /* ─── Demo download overlay ──────────────────────────────────────── */
-  .demo-loading-overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 10000;
-    background: rgba(10, 10, 10, 0.85);
-    backdrop-filter: blur(8px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 24px;
-  }
-
-  .demo-loading-card {
-    background: #14141a;
-    border: 1px solid rgba(255, 133, 119, 0.15);
-    border-radius: 8px;
-    padding: 32px 36px;
-    width: 100%;
-    max-width: 460px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-    text-align: center;
-  }
-
-  .demo-loading-card h2 {
-    font-size: 18px;
-    font-weight: 600;
-    margin: 0 0 6px 0;
-    color: #fff;
-  }
-
-  .demo-loading-subtitle {
-    font-size: 13px;
-    color: #888;
-    margin: 0 0 14px 0;
-  }
-
-  .demo-spinner {
-    width: 36px;
-    height: 36px;
-    margin: 0 auto 18px;
-    border: 3px solid rgba(255, 255, 255, 0.08);
-    border-top-color: #FF8577;
-    border-right-color: #7EC8E3;
-    border-radius: 50%;
-    animation: demo-spin 0.9s linear infinite;
-  }
-
-  @keyframes demo-spin {
-    to { transform: rotate(360deg); }
-  }
-
-  .demo-progress-hint {
-    font-size: 11px;
-    color: #666;
-    font-style: italic;
-    margin: 0;
-  }
+  /* (Demo download overlay CSS removed in v1.0.8 along with the demo
+     download flow. Restore alongside the standalone demo bundle when
+     it ships.) */
 
 </style>

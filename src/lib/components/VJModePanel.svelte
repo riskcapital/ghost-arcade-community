@@ -1577,7 +1577,6 @@
               <button class="vj-menu-item" onclick={() => vjFileAction('saveAs')}>Save As...<span class="vj-menu-sc">Ctrl+Shift+S</span></button>
               <div class="vj-menu-sep"></div>
               <button class="vj-menu-item" onclick={() => vjFileAction('importPresets')}>Import Presets...</button>
-              <button class="vj-menu-item" onclick={() => vjFileAction('loadDemo')}>Load Demo Project</button>
               <div class="vj-menu-sep"></div>
               <button class="vj-menu-item" onclick={() => vjFileAction('undo')}>Undo<span class="vj-menu-sc">Ctrl+Z</span></button>
               <button class="vj-menu-item" onclick={() => vjFileAction('redo')}>Redo<span class="vj-menu-sc">Ctrl+Y</span></button>

@@ -33,7 +33,7 @@ const ALLOWED_IPC_COMMANDS = new Set([
 
   // File system
   'pick_directory', 'save_file_binary', 'save_file_text', 'save_project_dialog',
-  'read_project_file', 'read_local_asset_file', 'download_demo_zip',
+  'read_project_file', 'read_local_asset_file',
 
   // Cloud shader source persistence (saved to userData/shaders/)
   'save_shader_source', 'list_shader_sources', 'delete_shader_source',
@@ -69,7 +69,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   on: (channel, callback) => {
     const allowed = [
-      'demo-download-progress', 'open-settings', 'output-cursor',
+      'open-settings', 'output-cursor',
       // Pushed from main whenever startNodeServer() updates state, so
       // the mobile pairing UI updates without polling.
       'companion-status',

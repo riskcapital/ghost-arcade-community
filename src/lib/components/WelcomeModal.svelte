@@ -25,7 +25,8 @@
     <p class="welcome-subtitle">Open-source projection mapping &amp; VJ software</p>
 
     <p class="welcome-body">
-      A demo project will load automatically so you have something to play with.
+      Add a layer from the <strong>+ Add Layer</strong> menu (top-left) to get
+      started — pick a shader, drop in a video, or sketch with light painting.
       Open the <strong>Settings</strong> panel for input device options, MIDI
       controllers, and output configuration.
     </p>

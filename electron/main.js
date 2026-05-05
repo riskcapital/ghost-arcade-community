@@ -703,72 +703,10 @@ function registerIpcHandlers() {
     }
   });
 
-  // Demo project download + extract
-  // Pulls the demo .gha bundle from the public releases repo. URL is
-  // overridable from the renderer for forks that want to ship their own demo.
-  ipcMain.handle('download_demo_zip', async (_, { url } = {}) => {
-    const extractZip = (await import('extract-zip')).default;
-    const targetDir = path.join(app.getPath('documents'), 'Ghost Arcade Community', 'Demo Project');
-    const demoFile = path.join(targetDir, 'demo.gha');
-
-    if (fs.existsSync(demoFile)) {
-      return { projectDir: targetDir, projectJSON: fs.readFileSync(demoFile, 'utf-8'), alreadyExists: true };
-    }
-
-    fs.mkdirSync(targetDir, { recursive: true });
-
-    const downloadUrl = url || 'https://github.com/riskcapital/ghost-arcade-releases/releases/download/demo-assets/ghost-arcade-demo.zip';
-    console.log('[Demo] Downloading from:', downloadUrl);
-
-    const response = await fetch(downloadUrl, { signal: AbortSignal.timeout(300_000) });
-    if (!response.ok) throw new Error(`Download failed: ${response.status}`);
-
-    const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
-    const reader = response.body.getReader();
-    const chunks = [];
-    let received = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      received += value.length;
-      if (contentLength > 0 && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('demo-download-progress', {
-          received, total: contentLength, percent: Math.round((received / contentLength) * 100),
-        });
-      }
-    }
-
-    const tempZip = path.join(app.getPath('temp'), 'ghost-arcade-community-demo.zip');
-    fs.writeFileSync(tempZip, Buffer.concat(chunks));
-    await extractZip(tempZip, { dir: targetDir });
-    try { fs.unlinkSync(tempZip); } catch { /* */ }
-
-    let illFile = demoFile;
-    if (!fs.existsSync(illFile)) {
-      const entries = fs.readdirSync(targetDir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isFile() && entry.name.endsWith('.gha')) {
-          illFile = path.join(targetDir, entry.name);
-          break;
-        }
-        if (entry.isDirectory()) {
-          const sub = fs.readdirSync(path.join(targetDir, entry.name));
-          const found = sub.find(f => f.endsWith('.gha'));
-          if (found) {
-            const subDir = path.join(targetDir, entry.name);
-            for (const f of sub) fs.renameSync(path.join(subDir, f), path.join(targetDir, f));
-            try { fs.rmdirSync(subDir); } catch { /* */ }
-            illFile = path.join(targetDir, found);
-            break;
-          }
-        }
-      }
-    }
-    if (!fs.existsSync(illFile)) throw new Error('No .gha project file found in the demo zip');
-
-    return { projectDir: targetDir, projectJSON: fs.readFileSync(illFile, 'utf-8'), alreadyExists: false };
-  });
+  // download_demo_zip IPC removed in v1.0.8 — no demo bundle ships with
+  // Community until we publish a standalone demo zip alongside a release.
+  // Once we do, we'll point users at the GitHub release page in their
+  // browser rather than implementing an in-app downloader.
 
   // Renderer to main log forwarding
   ipcMain.handle('debug_log', (_e, msg) => {
