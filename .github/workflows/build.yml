@@ -97,15 +97,27 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      # macOS dual-arch DMG (x64 + arm64). electron-builder.yml's
-      # `mac.target` declares both arches, BUT on macos-latest (Apple
-      # Silicon runner) the CLI defaults to host-arch only unless
-      # --x64 --arm64 are passed explicitly. Without those flags the
-      # v1.0.0 build only produced arm64 — Intel Mac users were stuck.
-      - name: Build Electron (macOS DMG, unsigned, dual-arch)
+      # macOS dual-arch DMG (x64 + arm64), signed with Risk Capital Media
+      # LLC's Developer ID Application cert + Apple notarization. Without
+      # this, Gatekeeper on recent macOS shows users "Apple cannot verify
+      # this app is free of malware" on first launch with NO "Open Anyway"
+      # escape hatch — only Quit / Move to Trash. Notarization adds ~3-5
+      # min to the build but is the only path that works for unauthenticated
+      # downloads from the GitHub release.
+      #
+      # `mac.target` in electron-builder.yml declares both arches, BUT on
+      # macos-latest (Apple Silicon runner) the CLI defaults to host-arch
+      # only unless --x64 --arm64 are passed explicitly. Without those
+      # flags the v1.0.0 build only produced arm64 — Intel users were stuck.
+      - name: Build Electron (macOS DMG, signed + notarized, dual-arch)
         run: npx electron-builder --mac dmg --x64 --arm64 --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: Upload macOS installer to release
         if: startsWith(github.ref, 'refs/tags/v')

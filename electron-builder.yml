@@ -63,11 +63,17 @@ mac:
   hardenedRuntime: true
   entitlements: build-resources/entitlements.mac.plist
   entitlementsInherit: build-resources/entitlements.mac.plist
-  # OSS doesn't notarize by default. To notarize a community build, set
-  # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID env vars and
-  # flip `notarize: true` here. Otherwise Mac Gatekeeper will require
-  # the user to right-click → Open the first time.
-  notarize: false
+  # Risk Capital Media LLC's Developer ID Application cert (the same one
+  # Pro uses) signs and notarizes Community DMGs too. Without this users
+  # got "Apple cannot verify this app is free of malware" on first launch
+  # with no "Open Anyway" path on recent macOS — only Quit / Move to Trash.
+  # Required env vars (set as Actions secrets on the Community repo):
+  #   CSC_LINK                       — base64 of the .p12 cert
+  #   CSC_KEY_PASSWORD               — .p12 password
+  #   APPLE_ID                       — apple developer account email
+  #   APPLE_APP_SPECIFIC_PASSWORD    — app-specific password from appleid.apple.com
+  #   APPLE_TEAM_ID                  — team id from developer.apple.com
+  notarize: true
   gatekeeperAssess: false
 
 dmg:
