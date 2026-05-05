@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
   import { RenderEngine, loadImageTexture, createVideoTexture, getThreeJSIframeContext, createThreeJSIframeContext, getJSAnimationContext, createJSAnimationContext } from '../renderer/engine';
+  import { shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
   import { project, layers } from '../stores/layers';
   import { mediaLibrary } from '../stores/media';
   import { vjOutputLayers, vjClipLauncher } from '../stores/vjClipLauncher';
@@ -22,7 +23,7 @@
   import { showToast } from '../stores/errorToast';
   import { invoke, isOsrMode, isOutputMode } from '$lib/bridge';
   import { drawTestPattern, type TestPatternType } from '../utils/testPatterns';
-  import { applyEdgeBlending, needsPostProcess, getOutputFilterCSS } from '../output/outputPostProcess';
+  import { applyEdgeBlending } from '../output/outputPostProcess';
   import { FluidSimulation, type FluidMode } from '../effects/fluidSimulation';
   import { ParticleSystem3D } from '../effects/particleSystem3D';
   // ParticleSystem removed — Particles3D runs as standalone Bevy app via Spout
@@ -46,33 +47,8 @@
   let wrapperEl: HTMLDivElement;
   let outputOverlayCanvas: HTMLCanvasElement;
 
-  // Output post-processing (reactive)
-  $: outputFilterCSS = getOutputFilterCSS($settings.output);
-
-  // ── Output-window display transforms (rotation + crop) ────────────────────
-  // Applied via CSS only when this Canvas is rendering the output window
-  // (isOutputMode). In editor mode they're a no-op so the user always sees
-  // the un-transformed source while editing. Pure GPU compositor work — no
-  // shader cost, no extra texture upload.
-  $: outputRotationDeg = isOutputMode ? ($settings.output.outputRotation ?? 0) : 0;
-  $: outputCropX = isOutputMode ? ($settings.output.outputCropX ?? 0) : 0;
-  $: outputCropY = isOutputMode ? ($settings.output.outputCropY ?? 0) : 0;
-  $: outputCropW = isOutputMode ? ($settings.output.outputCropWidth ?? 1) : 1;
-  $: outputCropH = isOutputMode ? ($settings.output.outputCropHeight ?? 1) : 1;
-  $: outputCropActive = isOutputMode && (outputCropX > 0 || outputCropY > 0 || outputCropW < 1 || outputCropH < 1);
-  // clip-path crops, then a transform scales the kept region back to fill
-  // the window so the projector still gets a full-screen image. Translate
-  // first so the scale origin matches the kept region's top-left corner.
-  $: outputCropClipPath = outputCropActive
-    ? `inset(${outputCropY * 100}% ${(1 - outputCropX - outputCropW) * 100}% ${(1 - outputCropY - outputCropH) * 100}% ${outputCropX * 100}%)`
-    : 'none';
-  $: outputCropTransform = outputCropActive
-    ? `translate(${(-outputCropX / outputCropW) * 100}%, ${(-outputCropY / outputCropH) * 100}%) scale(${1 / outputCropW}, ${1 / outputCropH})`
-    : '';
-  $: outputRotationTransform = outputRotationDeg !== 0 ? `rotate(${outputRotationDeg}deg)` : '';
-  // Combine: rotation goes outermost (rotates the cropped frame),
-  // then crop scale pushes the kept region to fill.
-  $: outputCanvasTransform = [outputRotationTransform, outputCropTransform].filter(Boolean).join(' ');
+  // Output-window transforms are applied in the final WebGL pass. Keeping them
+  // out of CSS avoids compositor resampling of the live projection canvas.
 
   // Redraw overlay when test pattern / edge blend settings change
   $: if (outputOverlayCanvas) {
@@ -94,11 +70,15 @@
     if (!outputOverlayCanvas) return;
     const w = outputOverlayCanvas.parentElement?.clientWidth || 1920;
     const h = outputOverlayCanvas.parentElement?.clientHeight || 1080;
-    outputOverlayCanvas.width = w;
-    outputOverlayCanvas.height = h;
+    const ratio = isOutputMode ? (window.devicePixelRatio || 1) : 1;
+    const backingW = Math.max(1, Math.round(w * ratio));
+    const backingH = Math.max(1, Math.round(h * ratio));
+    if (outputOverlayCanvas.width !== backingW) outputOverlayCanvas.width = backingW;
+    if (outputOverlayCanvas.height !== backingH) outputOverlayCanvas.height = backingH;
     const ctx = outputOverlayCanvas.getContext('2d');
     if (!ctx) return;
 
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     ctx.clearRect(0, 0, w, h);
 
     // Draw test pattern if active
@@ -347,7 +327,7 @@
     const { w: wrapW, h: wrapH } = getWrapperLayoutSize();
     const projW = $project.width || 1920;
     const projH = $project.height || 1080;
-    engine = new RenderEngine(canvas, projW, projH);
+    engine = new RenderEngine(canvas, projW, projH, { preserveDrawingBuffer: !isOutputMode });
     // Set initial container size from wrapper layout dimensions
     sizeContainer(wrapW, wrapH);
 
@@ -369,6 +349,16 @@
         offsetY: s.output.domeOffsetY,
         curvature: s.output.domeCurvature,
         truncation: s.output.domeTruncation,
+      });
+      engine.setOutputTransform({
+        rotation: isOutputMode ? (s.output.outputRotation ?? 0) : 0,
+        cropX: isOutputMode ? (s.output.outputCropX ?? 0) : 0,
+        cropY: isOutputMode ? (s.output.outputCropY ?? 0) : 0,
+        cropWidth: isOutputMode ? (s.output.outputCropWidth ?? 1) : 1,
+        cropHeight: isOutputMode ? (s.output.outputCropHeight ?? 1) : 1,
+        brightness: isOutputMode ? (s.output.brightness ?? 1) : 1,
+        contrast: isOutputMode ? (s.output.contrast ?? 1) : 1,
+        gamma: isOutputMode ? (s.output.gamma ?? 1) : 1,
       });
     });
 
@@ -460,6 +450,7 @@
 
         let layersToRender: Layer[];
         let compEffects: import('../types').Effect[] | undefined;
+        let didStageTexturePrepass = false;
 
         // VJ Stop All — render nothing (black output) until a clip is triggered
         if (vjState.stoppedAll && vjState.isLive) {
@@ -473,6 +464,7 @@
 
           // 2. Update all textures in one batch
           updateAllTextures(allManagedLayers, normalLayers);
+          didStageTexturePrepass = true;
 
           // 3. Build VJ source lookup
           const vjSourceMap = new Map<number, Layer>();
@@ -641,7 +633,10 @@
         }
 
         // ── Update all textures AFTER keyframe overrides so shader uniforms reflect new values ──
-        updateAllTextures(layersToRender, null);
+        const hasKeyframeOverrides = Object.keys(kfOverrides).length > 0;
+        if (!didStageTexturePrepass || hasKeyframeOverrides) {
+          updateAllTextures(layersToRender, null);
+        }
 
         // Phase integration now happens inside updateShaderTextures (per-layer, right before each shader renders)
         // We just need to clear phase state when playback stops
@@ -707,7 +702,13 @@
         // useful without being spammy — and only when something is rendering.
         if (!((_fpsLogCount++ ) % 10)) {
           const layerCount = ($project?.layers?.length ?? 0);
-          console.log(`[GPU] FPS=${fpsValue}  layers=${layerCount}  drawingBuffer=${canvas.width}x${canvas.height}  display=${canvas.clientWidth}x${canvas.clientHeight}`);
+          const dpr = window.devicePixelRatio || 1;
+          const displayW = canvas.clientWidth;
+          const displayH = canvas.clientHeight;
+          console.log(`[GPU] mode=${isOutputMode ? 'output' : 'main'} FPS=${fpsValue}  layers=${layerCount}  drawingBuffer=${canvas.width}x${canvas.height}  display=${displayW}x${displayH}  dpr=${dpr}`);
+          if (isOutputMode && (Math.abs(canvas.width - Math.round(displayW * dpr)) > 1 || Math.abs(canvas.height - Math.round(displayH * dpr)) > 1)) {
+            console.warn(`[Output] Canvas backing store ${canvas.width}x${canvas.height} does not match display ${displayW}x${displayH} @ DPR ${dpr}. Use fullscreen output or Match Output Display to avoid compositor scaling.`);
+          }
         }
       }
 
@@ -839,9 +840,10 @@
   let _detectedOutputRes: { width: number; height: number } | null = null;
   invoke('get_displays').then((displays: any) => {
     if (Array.isArray(displays) && displays.length > 0) {
-      const external = displays.find((d: any) => !d.isPrimary);
+      const external = displays.find((d: any) => !d.primary);
       const target = external || displays[0];
-      if (target) _detectedOutputRes = { width: target.width, height: target.height };
+      const bounds = target?.bounds || target;
+      if (bounds) _detectedOutputRes = { width: bounds.width, height: bounds.height };
     }
   }).catch(() => {});
 
@@ -1274,8 +1276,7 @@
         if (!video) {
           video = document.createElement('video');
           video.src = source.src;
-          // Only set crossOrigin for remote URLs, not blob: URLs
-          if (!source.src.startsWith('blob:')) {
+          if (shouldUseAnonymousCrossOrigin(source.src)) {
             video.crossOrigin = 'anonymous';
           }
           video.loop = true;
@@ -2030,13 +2031,15 @@
 
       // Check if splat file changed and needs to be loaded (supports both .ply and .splat)
       const currentPlyUrl = layer.splatContent.filePath || null;
-      if (currentPlyUrl && currentPlyUrl !== splatCtx.plyUrl && !splatCtx.loadingPly) {
+      const currentPlyKey = currentPlyUrl ? `${currentPlyUrl}|${(layer.splatContent as any)._sourceVersion || ''}` : null;
+      if (currentPlyUrl && currentPlyKey !== splatCtx.plyUrl && !splatCtx.loadingPly) {
         splatCtx.loadingPly = true;
-        splatCtx.plyUrl = currentPlyUrl;
+        splatCtx.plyUrl = currentPlyKey;
 
         // Detect .splat format by original filename or URL pattern
         const originalFileName = (layer.splatContent as any)._originalFileName || '';
-        const isSplatFormat = originalFileName.toLowerCase().endsWith('.splat');
+        const sourceName = originalFileName || currentPlyUrl;
+        const isSplatFormat = sourceName.toLowerCase().split(/[?#]/)[0].endsWith('.splat');
 
         if (isSplatFormat) {
           console.log('[Canvas] Loading .splat file:', originalFileName);
@@ -2055,7 +2058,7 @@
               console.error('[Canvas] Failed to load .splat:', err);
               showToast('Failed to load .splat file: ' + (err instanceof Error ? err.message : String(err)));
               const ctx = splatRenderers.get(layerId);
-              if (ctx) { ctx.loadingPly = false; ctx.plyUrl = null; } // Reset URL so retry works
+              if (ctx) ctx.loadingPly = false;
             });
         } else {
           console.log('[Canvas] Loading PLY file:', currentPlyUrl);
@@ -2074,7 +2077,7 @@
               console.error('[Canvas] Failed to load PLY:', err);
               showToast('Failed to load PLY file: ' + (err instanceof Error ? err.message : String(err)));
               const ctx = splatRenderers.get(layerId);
-              if (ctx) { ctx.loadingPly = false; ctx.plyUrl = null; } // Reset URL so retry works
+              if (ctx) ctx.loadingPly = false;
             });
         }
       }
@@ -2187,11 +2190,12 @@
       // Check if model data changed and needs to be loaded.
       // The _failedUrl guard prevents infinite retry loops when a URL fails (e.g. stale blob from a previous session).
       const currentModelUrl = layer.model3dContent.modelData || null;
+      const currentModelKey = currentModelUrl ? `${currentModelUrl}|${(layer.model3dContent as any)._sourceVersion || ''}` : null;
       const failedUrl = (model3dCtx as any)._failedUrl;
 
-      if (currentModelUrl && currentModelUrl !== model3dCtx.modelUrl && currentModelUrl !== failedUrl && !model3dCtx.loadingModel) {
+      if (currentModelUrl && currentModelKey !== model3dCtx.modelUrl && currentModelKey !== failedUrl && !model3dCtx.loadingModel) {
         model3dCtx.loadingModel = true;
-        model3dCtx.modelUrl = currentModelUrl;
+        model3dCtx.modelUrl = currentModelKey;
         console.log('[Canvas] Loading 3D model:', layer.model3dContent.modelName);
 
         const ctx = model3dCtx;
@@ -2209,8 +2213,8 @@
             showToast('3D model could not be loaded. Re-add the model file to this layer.');
             ctx.loadingModel = false;
             // Mark this URL as failed so we DON'T retry every frame
-            (ctx as any)._failedUrl = currentModelUrl;
-            ctx.modelUrl = currentModelUrl; // Set to match so condition doesn't re-trigger
+            (ctx as any)._failedUrl = currentModelKey;
+            ctx.modelUrl = currentModelKey; // Set to match so condition doesn't re-trigger
           });
       }
 
@@ -2704,16 +2708,9 @@
     class:output-mode={isOsrMode || isOutputMode}
     bind:this={containerEl}
   >
-    <canvas class="main-canvas" bind:this={canvas}
-      style:filter={outputFilterCSS !== 'none' ? outputFilterCSS : null}
-      style:transform={outputCanvasTransform || null}
-      style:clip-path={outputCropClipPath !== 'none' ? outputCropClipPath : null}
-      style:transform-origin={outputCropActive ? '0 0' : 'center'}></canvas>
-    <!-- Edge blend + test pattern overlay (rotates + crops with the main canvas) -->
-    <canvas class="output-overlay" bind:this={outputOverlayCanvas}
-      style:transform={outputCanvasTransform || null}
-      style:clip-path={outputCropClipPath !== 'none' ? outputCropClipPath : null}
-      style:transform-origin={outputCropActive ? '0 0' : 'center'}></canvas>
+    <canvas class="main-canvas" bind:this={canvas}></canvas>
+    <!-- Edge blend + test pattern overlay over the final projected frame -->
+    <canvas class="output-overlay" bind:this={outputOverlayCanvas}></canvas>
     {#if $settings.output.blackout}
       <div class="blackout-overlay"></div>
     {/if}

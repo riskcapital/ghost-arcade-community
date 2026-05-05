@@ -15,6 +15,7 @@ import type {
   Model3DVertexDecoration,
   Model3DLightingPreset,
 } from '../types';
+import { isLocalFileSource, loadAssetArrayBuffer } from '../utils/localAsset';
 
 // ============================================================================
 // UNIFIED VERTEX SHADER WITH MORPHING
@@ -856,7 +857,46 @@ export class Model3DRenderer {
     this.setupLighting('studio');
   }
 
-  // Load 3D model from data URL or blob URL
+  private shouldParseModelDirectly(source: string): boolean {
+    return isLocalFileSource(source) || /^data:/i.test(source) || /^blob:/i.test(source);
+  }
+
+  private async parseModelDirectly(
+    source: string,
+    format: string,
+    onGltfLoad: (gltf: { scene: THREE.Group; animations: THREE.AnimationClip[] }) => void,
+    onObjectLoad: (object: THREE.Object3D) => void,
+    onError: (error: unknown) => void
+  ): Promise<boolean> {
+    if (!this.shouldParseModelDirectly(source)) return false;
+
+    try {
+      const buffer = await loadAssetArrayBuffer(source);
+
+      switch (format) {
+        case 'glb':
+          this.gltfLoader.parse(buffer, '', onGltfLoad, onError);
+          break;
+        case 'gltf':
+          this.gltfLoader.parse(new TextDecoder().decode(buffer), '', onGltfLoad, onError);
+          break;
+        case 'obj':
+          onObjectLoad(this.objLoader.parse(new TextDecoder().decode(buffer)));
+          break;
+        case 'fbx':
+          onObjectLoad(this.fbxLoader.parse(buffer, ''));
+          break;
+        default:
+          onError(new Error(`Unsupported format: ${format}`));
+      }
+    } catch (err) {
+      onError(err);
+    }
+
+    return true;
+  }
+
+  // Load 3D model from data URL, blob URL, remote URL, or Electron local file path.
   async loadModel(dataUrl: string, format: string): Promise<{ vertexCount: number; faceCount: number; hasAnimations: boolean }> {
     return new Promise((resolve, reject) => {
       // Clear existing model
@@ -971,31 +1011,40 @@ export class Model3DRenderer {
         reject(error instanceof Error ? error : new Error(String(error)));
       };
 
-      switch (format) {
-        case 'glb':
-        case 'gltf':
-          this.gltfLoader.load(dataUrl, (gltf) => {
-            // Capture embedded animations before processing scene
-            this.animationClips = gltf.animations || [];
-            onLoad(gltf.scene);
-          }, undefined, onError);
-          break;
+      const onModelLoaded = (object: THREE.Object3D) => {
+        onLoad(object);
+      };
 
-        case 'obj':
-          this.objLoader.load(dataUrl, onLoad, undefined, onError);
-          break;
+      const onGltfLoaded = (gltf: { scene: THREE.Group; animations: THREE.AnimationClip[] }) => {
+        this.animationClips = gltf.animations || [];
+        onModelLoaded(gltf.scene);
+      };
 
-        case 'fbx':
-          this.fbxLoader.load(dataUrl, (fbx) => {
-            // FBX files can also contain animations
-            this.animationClips = fbx.animations || [];
-            onLoad(fbx);
-          }, undefined, onError);
-          break;
+      void this.parseModelDirectly(dataUrl, format, onGltfLoaded, onModelLoaded, onError).then((handled) => {
+        if (handled) return;
 
-        default:
-          reject(new Error(`Unsupported format: ${format}`));
-      }
+        switch (format) {
+          case 'glb':
+          case 'gltf':
+            this.gltfLoader.load(dataUrl, onGltfLoaded, undefined, onError);
+            break;
+
+          case 'obj':
+            this.objLoader.load(dataUrl, onModelLoaded, undefined, onError);
+            break;
+
+          case 'fbx':
+            this.fbxLoader.load(dataUrl, (fbx) => {
+              // FBX files can also contain animations
+              this.animationClips = fbx.animations || [];
+              onModelLoaded(fbx);
+            }, undefined, onError);
+            break;
+
+          default:
+            reject(new Error(`Unsupported format: ${format}`));
+        }
+      });
     });
   }
 

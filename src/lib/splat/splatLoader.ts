@@ -7,6 +7,7 @@
 //   - Rotation: quaternion as 4x uint8 (4 bytes) — normalized to [0,255] → [-1,1]
 
 import type { PLYVertex, PLYData } from './plyLoader';
+import { loadAssetArrayBuffer } from '../utils/localAsset';
 
 const SPLAT_ROW_SIZE = 32;
 
@@ -104,10 +105,6 @@ export async function loadSplatFromFile(file: File): Promise<PLYData> {
  * Load a .splat file from a URL (blob URL or remote)
  */
 export async function loadSplatFromUrl(url: string): Promise<PLYData> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch .splat file: ${response.status} ${response.statusText}`);
-  }
-  const buffer = await response.arrayBuffer();
+  const buffer = await loadAssetArrayBuffer(url);
   return parseSplatBuffer(buffer);
 }

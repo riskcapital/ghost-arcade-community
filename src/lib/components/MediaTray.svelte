@@ -15,6 +15,7 @@
   import { downloadRecording } from '../recording/recorder';
   import { updateJSAnimationParams } from '../renderer/js-animation';
   import { canUseFluidGen } from '../stores/license';
+  import { shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
   import AIShaderGenerator from './AIShaderGenerator.svelte';
   import AIVideoGenerator from './AIVideoGenerator.svelte';
   import ShaderLibrary from './ShaderLibrary.svelte';
@@ -731,7 +732,9 @@
     if (mediaType === 'video') {
       const video = document.createElement('video');
       video.src = url;
-      video.crossOrigin = 'anonymous';
+      if (shouldUseAnonymousCrossOrigin(url)) {
+        video.crossOrigin = 'anonymous';
+      }
       video.loop = true;
       video.muted = true;
       video.playsInline = true;
@@ -904,8 +907,7 @@
         if (item.type === 'video' && item.videoElement) {
           const video = document.createElement('video');
           video.src = item.src;
-          // Only set crossOrigin for remote URLs, not blob: URLs
-          if (!item.src.startsWith('blob:')) {
+          if (shouldUseAnonymousCrossOrigin(item.src)) {
             video.crossOrigin = 'anonymous';
           }
           video.loop = true;

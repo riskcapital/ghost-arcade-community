@@ -28,12 +28,21 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 
-// GPU / DPI / autoplay tuning. Same flags the Pro version uses; nothing
-// here is feature-gated, just performance + Chromium-quirk workarounds.
+// GPU / DPI / autoplay tuning. Projection-safe mode avoids forcing Chromium
+// presentation paths that can flicker or band on some Windows projector stacks.
+const PROJECTION_SAFE_MODE = process.argv.includes('--projection-safe-mode') || process.env.GA_PROJECTION_SAFE_MODE === '1';
+const EXPERIMENTAL_GPU_PRESENT = process.argv.includes('--experimental-gpu-present') || process.env.GA_EXPERIMENTAL_GPU_PRESENT === '1';
 app.commandLine.appendSwitch('force_high_performance_gpu');
-app.commandLine.appendSwitch('enable-zero-copy');
-app.commandLine.appendSwitch('enable-hardware-overlays');
-app.commandLine.appendSwitch('enable-gpu-rasterization');
+if (PROJECTION_SAFE_MODE) {
+  app.commandLine.appendSwitch('disable-zero-copy');
+  app.commandLine.appendSwitch('disable-features', 'HardwareOverlays');
+} else {
+  app.commandLine.appendSwitch('enable-gpu-rasterization');
+  if (EXPERIMENTAL_GPU_PRESENT) {
+    app.commandLine.appendSwitch('enable-zero-copy');
+    app.commandLine.appendSwitch('enable-hardware-overlays');
+  }
+}
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.commandLine.appendSwitch('disable-pinch');
 app.commandLine.appendSwitch('high-dpi-support', '1');
@@ -62,6 +71,7 @@ console.error = (...args) => {
   try { fs.appendFileSync(_logFile, `[ERR] ${msg}\n`); } catch { /* */ }
   try { _origErr(...args); } catch { /* */ }
 };
+console.log(`[Main] Projection safe mode=${PROJECTION_SAFE_MODE} experimentalGpuPresent=${EXPERIMENTAL_GPU_PRESENT}`);
 
 // Don't let EPIPE on stdout/stderr or unhandled async crashes nuke the app.
 process.stdout?.on?.('error', () => {});
@@ -459,6 +469,48 @@ function registerIpcHandlers() {
     return { content, dir: path.dirname(filePath) };
   });
 
+  ipcMain.handle('read_local_asset_file', async (_, args) => {
+    try {
+      const rawPath = args?.path;
+      if (typeof rawPath !== 'string' || !rawPath) {
+        return { success: false, error: 'Invalid asset path' };
+      }
+
+      const assetExts = new Set([
+        '.ply', '.splat',
+        '.glb', '.gltf', '.obj', '.fbx',
+        '.bin', '.mtl',
+        '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif',
+        '.ktx2', '.hdr', '.exr',
+      ]);
+
+      let normalized;
+      if (/^file:/i.test(rawPath)) {
+        normalized = fileURLToPath(rawPath);
+      } else {
+        normalized = path.normalize(rawPath);
+      }
+
+      if (!path.isAbsolute(normalized)) {
+        return { success: false, error: 'Asset path must be absolute' };
+      }
+
+      const ext = path.extname(normalized).toLowerCase();
+      if (!assetExts.has(ext)) {
+        return { success: false, error: `Unsupported asset type: ${ext || '(none)'}` };
+      }
+
+      if (!fs.existsSync(normalized)) {
+        return { success: false, error: 'Asset file not found' };
+      }
+
+      const bytes = fs.readFileSync(normalized);
+      return { success: true, bytes: new Uint8Array(bytes) };
+    } catch (err) {
+      return { success: false, error: err?.message || String(err) };
+    }
+  });
+
   ipcMain.handle('pick_directory', async () => {
     const { dialog } = require('electron');
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -793,13 +845,13 @@ function setupPermissions() {
       // trusted local animation surfaces, but does not allow runtime eval.
       scriptSrc,
       "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data: blob: https:",
-      "media-src 'self' blob: data:",
+      "img-src 'self' data: blob: file: https:",
+      "media-src 'self' blob: data: file:",
       "font-src 'self' data:",
       // Local WS server (9001) + HTTP server (9002) for mobile companion.
       // Vite dev server (1420) for development. github for cloud shader
       // catalog metadata fetches.
-      "connect-src 'self' ws://localhost:* ws://127.0.0.1:* http://localhost:* http://127.0.0.1:* https://github.com https://*.githubusercontent.com https://api.github.com",
+      "connect-src 'self' blob: ws://localhost:* ws://127.0.0.1:* http://localhost:* http://127.0.0.1:* https://github.com https://*.githubusercontent.com https://api.github.com",
       "worker-src 'self' blob:",
       "child-src 'self' blob:",
       "object-src 'none'",
@@ -1033,6 +1085,7 @@ function createOutputWindow(args = {}) {
       contextIsolation: true,
       nodeIntegration: false,
       webgl: true,
+      backgroundThrottling: false,
     },
   });
   outputWindow.setMenuBarVisibility(false);

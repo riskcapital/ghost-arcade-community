@@ -2,6 +2,7 @@
   import { onDestroy } from 'svelte';
   import { project, selectedLayer } from '../stores/layers';
   import { showLoading, hideLoading } from '../stores/loading';
+  import { getPathForFile } from '../utils/localAsset';
   import type {
     Model3DMaterialType,
     Model3DWireframeMode,
@@ -191,21 +192,24 @@
 
     showLoading('Loading 3D model...');
     try {
-      // Revoke previous URL only when replacing it with a new blob — safe
-      // because nothing else references it once we overwrite modelData.
+      const localPath = getPathForFile(file);
+
+      // Revoke previous browser fallback URL when replacing the source.
       if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
 
-      const blobUrl = URL.createObjectURL(file);
-      currentBlobUrl = blobUrl;
+      const modelSource = localPath || URL.createObjectURL(file);
+      currentBlobUrl = localPath ? null : modelSource;
       currentFileName = file.name;
       cachedFile = file;
 
-      console.log('[Model3DPanel] Created blob URL for model:', blobUrl);
+      console.log('[Model3DPanel] Loaded model source:', localPath || modelSource);
 
       doUpdate({
-        modelData: blobUrl,
+        modelData: modelSource,
         modelFormat: ext as any,
         modelName: file.name,
+        _originalFilePath: localPath || undefined,
+        _sourceVersion: Date.now(),
       });
     } catch (err) {
       console.error('Failed to load 3D model:', err);

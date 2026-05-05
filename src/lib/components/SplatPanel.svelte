@@ -2,7 +2,8 @@
   import { onDestroy } from 'svelte';
   import { project, selectedLayer } from '../stores/layers';
   import { showLoading, hideLoading } from '../stores/loading';
-  import { loadPLYFromFile } from '../splat';
+  import { loadPLYFromFile, loadSplatFromFile } from '../splat';
+  import { getPathForFile } from '../utils/localAsset';
   import type {
     SplatContent,
     SplatAnimationType,
@@ -150,34 +151,42 @@
 
     showLoading('Loading point cloud...');
     try {
+      const localPath = getPathForFile(file);
+
       if (ext === 'splat') {
-        // Native .splat format — create blob URL, Canvas will detect by extension
+        const splatData = await loadSplatFromFile(file);
         if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
-        const blobUrl = URL.createObjectURL(file);
-        currentBlobUrl = blobUrl;
+        const sourceUrl = localPath || URL.createObjectURL(file);
+        currentBlobUrl = localPath ? null : sourceUrl;
         currentFileName = file.name;
         // Store the original filename so Canvas can detect .splat format
         doUpdate({
-          filePath: blobUrl,
+          filePath: sourceUrl,
           dataType: 'gaussian',
+          pointCount: splatData.vertices.length,
           _originalFileName: file.name,
+          _originalFilePath: localPath || undefined,
+          _sourceVersion: Date.now(),
         } as any);
       } else {
         // PLY format
         const plyData = await loadPLYFromFile(file);
 
         if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
-        const blobUrl = URL.createObjectURL(file);
-        currentBlobUrl = blobUrl;
+        const sourceUrl = localPath || URL.createObjectURL(file);
+        currentBlobUrl = localPath ? null : sourceUrl;
         currentFileName = file.name;
 
-        console.log('[SplatPanel] Created blob URL for PLY:', blobUrl, 'vertices:', plyData.vertices.length, 'hasUVs:', plyData.hasUVs);
+        console.log('[SplatPanel] Loaded PLY source:', localPath || sourceUrl, 'vertices:', plyData.vertices.length, 'hasUVs:', plyData.hasUVs);
 
         const updates: Partial<SplatContent> = {
-          filePath: blobUrl,
+          filePath: sourceUrl,
           dataType: plyData.dataType,
           pointCount: plyData.vertices.length,
           hasNativeUVs: plyData.hasUVs,
+          _originalFileName: file.name,
+          _originalFilePath: localPath || undefined,
+          _sourceVersion: Date.now(),
         };
 
         // Auto-enable native texture projection when PLY has embedded UVs
@@ -196,7 +205,7 @@
   }
 
   // Display-friendly filename (extract from blob URL or show stored name)
-  $: displayFileName = currentFileName || (sc?.filePath?.startsWith('blob:') ? 'Loaded File' : sc?.filePath || '');
+  $: displayFileName = currentFileName || (sc as any)?._originalFileName || (sc?.filePath?.startsWith('blob:') ? 'Loaded File' : sc?.filePath || '');
 </script>
 
 {#if (isVJMode ? sc : layer && sc)}

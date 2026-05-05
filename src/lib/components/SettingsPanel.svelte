@@ -15,7 +15,7 @@
   export let onClose: () => void = () => {};
 
   // Output display transforms now live in $settings.output (auto-broadcast
-  // via state-sync to the output window; CSS-applied on the output canvas).
+  // via state-sync to the output window; applied in the final WebGL pass).
   // No props needed — read/write the store directly.
   $: outputRotation = $settings.output.outputRotation ?? 0;
   $: outputCropRegion = {

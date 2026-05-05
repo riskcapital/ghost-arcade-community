@@ -12,6 +12,7 @@
   import EffectPickerModal from './EffectPickerModal.svelte';
   import EdgeEffectsPanel from './EdgeEffectsPanel.svelte';
   import { generateCachedThumbnail } from '../isf/thumbnail';
+  import { shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
 
   // Shader thumbnail cache: layerId -> { url, codeSnippet }
   let shaderThumbnails: Record<string, string> = {};
@@ -321,7 +322,9 @@
     if (mediaType === 'video') {
       const video = document.createElement('video');
       video.src = url;
-      video.crossOrigin = 'anonymous';
+      if (shouldUseAnonymousCrossOrigin(url)) {
+        video.crossOrigin = 'anonymous';
+      }
       video.loop = true;
       video.muted = true;
       video.playsInline = true;

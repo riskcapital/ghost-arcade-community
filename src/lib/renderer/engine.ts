@@ -20,6 +20,21 @@ import { domeProjectionShader } from './shaders/dome';
 // so the PNG is only fetched once per session.
 let _watermarkTextureCache: THREE.Texture | null = null;
 
+export interface RenderEngineOptions {
+  preserveDrawingBuffer?: boolean;
+}
+
+export interface OutputTransformParams {
+  rotation?: 0 | 90 | 180 | 270;
+  cropX?: number;
+  cropY?: number;
+  cropWidth?: number;
+  cropHeight?: number;
+  brightness?: number;
+  contrast?: number;
+  gamma?: number;
+}
+
 interface LayerRenderObject {
   mesh: THREE.Mesh;
   material: THREE.ShaderMaterial;
@@ -138,9 +153,10 @@ export class RenderEngine {
   private transitionStartTime: number = 0;
   private transitionDuration: number = 0;
 
-  constructor(canvas: HTMLCanvasElement, width: number, height: number) {
+  constructor(canvas: HTMLCanvasElement, width: number, height: number, options: RenderEngineOptions = {}) {
     this.width = width;
     this.height = height;
+    const preserveDrawingBuffer = options.preserveDrawingBuffer ?? true;
 
     // Create renderer
     // premultipliedAlpha: false is critical for correct video capture colors
@@ -149,7 +165,7 @@ export class RenderEngine {
       canvas,
       antialias: false,
       alpha: true,
-      preserveDrawingBuffer: true,
+      preserveDrawingBuffer,
       premultipliedAlpha: false,
       powerPreference: 'high-performance',
     });
@@ -214,6 +230,11 @@ export class RenderEngine {
       fragmentShader: opaqueOutputFragmentShader,
       uniforms: {
         uTexture: { value: this.compositeTarget.texture },
+        uOutputCrop: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uOutputRotation: { value: 0 },
+        uBrightness: { value: 1 },
+        uContrast: { value: 1 },
+        uGamma: { value: 1 },
       },
       depthTest: false,
       depthWrite: false,
@@ -246,6 +267,23 @@ export class RenderEngine {
     this._copyScene = new THREE.Scene();
     this._copyScene.add(this._copyMesh);
     this._tempColor = new THREE.Color();
+  }
+
+  // Final output transform
+  public setOutputTransform(params: OutputTransformParams): void {
+    const material = this.outputQuad.material as THREE.ShaderMaterial;
+    const cropX = Math.max(0, Math.min(0.99, params.cropX ?? 0));
+    const cropY = Math.max(0, Math.min(0.99, params.cropY ?? 0));
+    const cropWidth = Math.max(0.01, Math.min(1 - cropX, params.cropWidth ?? 1));
+    const cropHeight = Math.max(0.01, Math.min(1 - cropY, params.cropHeight ?? 1));
+    const rotation = (((params.rotation ?? 0) % 360) + 360) % 360;
+    const rotationIndex = rotation === 90 ? 1 : rotation === 180 ? 2 : rotation === 270 ? 3 : 0;
+
+    material.uniforms.uOutputCrop.value.set(cropX, cropY, cropWidth, cropHeight);
+    material.uniforms.uOutputRotation.value = rotationIndex;
+    material.uniforms.uBrightness.value = Math.max(0, params.brightness ?? 1);
+    material.uniforms.uContrast.value = Math.max(0, params.contrast ?? 1);
+    material.uniforms.uGamma.value = Math.max(0.001, params.gamma ?? 1);
   }
 
   // ─── Watermark System ─────────────────────────────────────────────────────
@@ -1459,7 +1497,7 @@ export class RenderEngine {
       // Transition active: blend snapshot with live composite
       this.applyTransition();
     } else {
-      // Normal output: use the opaque output shader to ensure alpha = 1.0 (fixes faded recording)
+      // Normal output: use the output shader to apply projection-safe final transforms.
       this.renderer.setRenderTarget(null);
       (this.outputQuad.material as THREE.ShaderMaterial).uniforms.uTexture.value = this.compositeTarget.texture;
       this.renderer.render(this.outputScene, this.camera);
@@ -2336,8 +2374,12 @@ export class RenderEngine {
     this.transitionMaterial.uniforms.uProgress.value = eased;
     this.transitionMaterial.uniforms.uTime.value = elapsed;
 
-    this.renderer.setRenderTarget(null);
+    this.renderer.setRenderTarget(this.tempTarget);
     this.renderer.render(this.transitionScene, this.camera);
+
+    this.renderer.setRenderTarget(null);
+    (this.outputQuad.material as THREE.ShaderMaterial).uniforms.uTexture.value = this.tempTarget.texture;
+    this.renderer.render(this.outputScene, this.camera);
   }
 }
 

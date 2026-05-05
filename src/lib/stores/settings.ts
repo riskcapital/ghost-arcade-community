@@ -320,8 +320,8 @@ export interface OutputSettings {
   // ── Output-window display transforms ────────────────────────────────────
   // These ONLY affect the dedicated output window (second-display projection).
   // They live in settings so they auto-broadcast via the BroadcastChannel
-  // sync, applied via CSS on the output canvas (zero render cost — runs on
-  // the GPU compositor). Not persisted across sessions because they're
+  // sync, applied in the final WebGL output pass to avoid compositor
+  // resampling. Not persisted across sessions because they're
   // typically per-venue.
   outputRotation: 0 | 90 | 180 | 270;
   outputCropX: number;       // 0..0.9
@@ -425,7 +425,7 @@ function createDefaultSettings(): AppSettings {
       gamma: 1,
       contrast: 1,
       slices: [],
-      // Output-window display transforms (CSS-applied on output canvas)
+      // Output-window display transforms (final WebGL output pass)
       outputRotation: 0,
       outputCropX: 0,
       outputCropY: 0,

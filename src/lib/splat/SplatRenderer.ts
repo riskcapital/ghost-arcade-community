@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import type { PLYData } from './plyLoader';
 import type { SplatContent, SplatAnimationType, SplatDisplacementType, SplatColorEffectType, SplatOpacityEffectType, SplatCreativeEffectType } from '../types';
+import { shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
 
 // Vertex shader for point cloud rendering with all effects
 const vertexShader = `
@@ -1405,7 +1406,9 @@ export class SplatRenderer {
       video.loop = true;
       video.muted = true;
       video.playsInline = true;
-      video.crossOrigin = 'anonymous';
+      if (shouldUseAnonymousCrossOrigin(dataUrl)) {
+        video.crossOrigin = 'anonymous';
+      }
 
       video.addEventListener('loadeddata', () => {
         const videoTexture = new THREE.VideoTexture(video);

@@ -51,6 +51,7 @@
   import { loadShadersFromServer, loadCloudShadersFromDisk } from './lib/stores/shaderLibrary';
   import { preloadShaderLibrary } from './lib/preload';
   import { invoke, isMac, isDesktopApp } from './lib/bridge';
+  import { getPathForFile } from './lib/utils/localAsset';
   import type { Point2D, Layer, WarpCorners } from './lib/types';
   import { generateUUID } from './lib/types';
   import { createDefaultFreehandLine, createDefaultPointClickLine } from './lib/lines/types';
@@ -1287,6 +1288,60 @@
   };
   let companionStatus: CompanionStatus = { state: 'unstarted' };
   let companionForceStarting = false;
+  const LP_LIVE_PREVIEW_SYNC_INTERVAL_MS = 50;
+  const LP_LIVE_PREVIEW_MAX_POINTS = 300;
+
+  function resampleLightPaintingPreviewPoints(points: any[], maxCount = LP_LIVE_PREVIEW_MAX_POINTS) {
+    if (points.length <= maxCount) return points.slice();
+
+    const result: any[] = [];
+    const step = (points.length - 1) / (maxCount - 1);
+    for (let i = 0; i < maxCount; i++) {
+      const idx = i * step;
+      const lo = Math.floor(idx);
+      const hi = Math.min(lo + 1, points.length - 1);
+      const t = idx - lo;
+      const a = points[lo];
+      const b = points[hi];
+      result.push({
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        pressure: (a.pressure ?? 0.5) + ((b.pressure ?? 0.5) - (a.pressure ?? 0.5)) * t,
+        timestamp: (a.timestamp ?? 0) + ((b.timestamp ?? 0) - (a.timestamp ?? 0)) * t,
+      });
+    }
+    return result;
+  }
+
+  function cancelMobileLightPaintingPreview(state: any) {
+    if (state?.previewRafId !== null && state?.previewRafId !== undefined) {
+      cancelAnimationFrame(state.previewRafId);
+      state.previewRafId = null;
+    }
+  }
+
+  function flushMobileLightPaintingPreview(state: any, force = false) {
+    if (!state || state.points.length < 2) return;
+
+    const now = performance.now();
+    if (!force && now - (state.lastPreviewSyncTime ?? 0) < LP_LIVE_PREVIEW_SYNC_INTERVAL_MS) return;
+
+    state.lastPreviewSyncTime = now;
+    project.updateLightPaintingContent(state.layerId, {
+      livePreviewStroke: {
+        points: resampleLightPaintingPreviewPoints(state.points),
+        brush: state.brush,
+      },
+    });
+  }
+
+  function scheduleMobileLightPaintingPreview(state: any) {
+    if (!state || state.previewRafId != null) return;
+    state.previewRafId = requestAnimationFrame(() => {
+      state.previewRafId = null;
+      flushMobileLightPaintingPreview(state);
+    });
+  }
 
   async function ensureCompanionToken(): Promise<string> {
     if (companionTokenLoaded) return companionToken || '';
@@ -1692,6 +1747,8 @@
           brush,
           points: [],
           startTime: performance.now(),
+          previewRafId: null,
+          lastPreviewSyncTime: 0,
         };
         project.updateLightPaintingContent(layerId, { isRecording: true });
         break;
@@ -1701,20 +1758,18 @@
         if (!state) break;
         const { x, y, pressure, timestamp } = msg as any;
         state.points.push({ x, y, pressure: pressure ?? 0.5, timestamp: timestamp ?? (performance.now() - state.startTime) });
-        // Update live preview every 3rd point so output shows the stroke in real-time
-        if (state.points.length % 3 === 0) {
-          project.updateLightPaintingContent(state.layerId, {
-            livePreviewStroke: { points: [...state.points], brush: state.brush },
-          });
-        }
+        scheduleMobileLightPaintingPreview(state);
         break;
       }
       case 'lightpainting_stroke_end': {
         const state = (window as any).__mobileLPState;
         if (!state || state.points.length < 2) {
+          cancelMobileLightPaintingPreview(state);
+          if (state?.layerId) project.updateLightPaintingContent(state.layerId, { isRecording: false, livePreviewStroke: null });
           (window as any).__mobileLPState = null;
           break;
         }
+        cancelMobileLightPaintingPreview(state);
         // Finalize stroke with smoothing
         let finalPoints = [...state.points];
         const smoothing = state.brush.smoothing ?? 0.5;
@@ -1888,9 +1943,24 @@
     settings.setOutputWindowOpen(false);
   }
 
+  async function matchOutputDisplayResolution(reason: string) {
+    if (!isDesktopApp) return;
+    try {
+      const info: any = await invoke('get_output_display_info');
+      if (!info?.nativeWidth || !info?.nativeHeight) return;
+      const current = get(project);
+      if (current.width === info.nativeWidth && current.height === info.nativeHeight) return;
+      console.log(`[Output] Matching project resolution for ${reason}: ${current.width}x${current.height} -> ${info.nativeWidth}x${info.nativeHeight} (${info.label || 'display'})`);
+      project.setProjectDimensions(info.nativeWidth, info.nativeHeight);
+    } catch (err) {
+      console.warn('[Output] Could not match output display resolution:', err);
+    }
+  }
+
   async function toggleFullscreen() {
     // If output window is already open, toggle its fullscreen
     if (outputIsOpen && outputWindow) {
+      await matchOutputDisplayResolution('fullscreen output');
       const isFs = await outputWindow.toggleFullscreen();
       outputMode = isFs ? 'fullscreen' : 'window';
       return;
@@ -1899,7 +1969,8 @@
     // Open fullscreen output on external monitor (or primary if no external)
     if (outputMode !== 'fullscreen') {
       if (outputWindow) {
-        outputWindow.openFullscreenExternal();
+        await matchOutputDisplayResolution('fullscreen output');
+        await outputWindow.openFullscreenExternal();
         outputIsOpen = true;
         outputMode = 'fullscreen';
         settings.setOutputWindowOpen(true);
@@ -2050,6 +2121,18 @@
   // materialize blobs to the same place.
   let currentProjectPath: string | null = null;
 
+  function getDirectoryFromPath(filePath: string): string {
+    const sep = filePath.includes('\\') ? '\\' : '/';
+    const idx = filePath.lastIndexOf(sep);
+    return idx >= 0 ? filePath.substring(0, idx + 1) : '';
+  }
+
+  function getFileNameFromPath(filePath: string): string {
+    const sep = filePath.includes('\\') ? '\\' : '/';
+    const idx = filePath.lastIndexOf(sep);
+    return idx >= 0 ? filePath.slice(idx + 1) : filePath;
+  }
+
   /**
    * Walk a project JSON and materialize every `blob:` URL into an actual
    * sibling file at `projectDir`, replacing the JSON's `src` field with a
@@ -2091,8 +2174,18 @@
           'model.glb';
         targets.push({ parent: node, key: 'modelData', src: node.modelData, nameHint: hint });
       }
+      // Point cloud / splat data can live in splatContent.filePath, including
+      // inside saved stage presets and VJ clips.
+      if (typeof node.filePath === 'string' && node.filePath.startsWith('blob:')) {
+        const hint =
+          (typeof node._originalFileName === 'string' && node._originalFileName) ||
+          (typeof node.name === 'string' && node.name) ||
+          parentName ||
+          'point-cloud.ply';
+        targets.push({ parent: node, key: 'filePath', src: node.filePath, nameHint: hint });
+      }
       for (const [k, v] of Object.entries(node)) {
-        if (k === 'src' || k === 'modelData') continue; // already handled
+        if (k === 'src' || k === 'modelData' || k === 'filePath') continue; // already handled
         walk(v, typeof node.name === 'string' ? node.name : parentName);
       }
     }
@@ -2174,8 +2267,7 @@
       const api = (window as any).electronAPI;
       if (api?.invoke) {
         try {
-          const sep = currentProjectPath.includes('\\') ? '\\' : '/';
-          const projectDir = currentProjectPath.substring(0, currentProjectPath.lastIndexOf(sep) + 1);
+          const projectDir = getDirectoryFromPath(currentProjectPath);
           const portableJson = await materializeBlobsInProject(jsonStr, projectDir);
           const result = await api.invoke('save_file_text', { path: currentProjectPath, content: portableJson });
           if (!result?.success) {
@@ -2183,6 +2275,7 @@
             return;
           }
           console.log('Project saved successfully:', currentProjectPath);
+          recentFiles.add(getFileNameFromPath(currentProjectPath), currentProjectPath);
           markAsSaved();
           clearAutosave();
           return;
@@ -2233,9 +2326,7 @@
           });
           if (dialogResult?.canceled || !dialogResult?.filePath) return;
           const filePath: string = dialogResult.filePath;
-          // Derive project dir from the chosen file path
-          const sep = filePath.includes('\\') ? '\\' : '/';
-          const projectDir = filePath.substring(0, filePath.lastIndexOf(sep) + 1);
+          const projectDir = getDirectoryFromPath(filePath);
           const portableJson = await materializeBlobsInProject(jsonStr, projectDir);
           const writeResult = await api.invoke('save_file_text', { path: filePath, content: portableJson });
           if (!writeResult?.success) {
@@ -2244,7 +2335,7 @@
           }
           currentProjectPath = filePath;
           console.log('Project saved successfully (Electron native):', filePath);
-          recentFiles.add(filePath.split(sep).pop() || 'project.gha', null);
+          recentFiles.add(getFileNameFromPath(filePath) || 'project.gha', filePath);
           markAsSaved();
           clearAutosave();
           return;
@@ -2310,6 +2401,8 @@
     const input = event.target as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
+    const electronPath = isDesktopApp ? getPathForFile(file) : '';
+    const projectDir = electronPath ? getDirectoryFromPath(electronPath) : undefined;
 
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -2322,13 +2415,12 @@
         try { isfShaderCache.clear(); } catch {}
         try { modulationStore.clearAll(); } catch {}
 
-        const success = project.importProjectJSON(content);
+        const success = project.importProjectJSON(content, projectDir);
         if (success) {
           console.log('Project loaded successfully');
           currentFileHandle = null; // Clear file handle since we loaded via file input
-          // Electron adds `path` to File objects as a non-standard extension; use it when available
-          const electronPath = (file as any).path || null;
-          recentFiles.add(file.name, electronPath);
+          currentProjectPath = electronPath || null;
+          recentFiles.add(file.name, electronPath || null);
           markAsSaved();
         } else {
           alert('Failed to load project. The file may be corrupted or invalid.');
@@ -2378,6 +2470,7 @@
         if (success) {
           console.log('Project loaded from recent:', entry.path);
           currentFileHandle = null;
+          currentProjectPath = entry.path;
           recentFiles.add(entry.name, entry.path); // Bump to top
           markAsSaved();
           return;
@@ -2455,11 +2548,13 @@
     input.onchange = () => {
       const file = input.files?.[0];
       if (!file) return;
+      const electronPath = isDesktopApp ? getPathForFile(file) : '';
+      const projectDir = electronPath ? getDirectoryFromPath(electronPath) : undefined;
       const reader = new FileReader();
       reader.onload = () => {
         try {
           const data = JSON.parse(reader.result as string);
-          const presets = project.importPresetsFromFile(data);
+          const presets = project.importPresetsFromFile(data, projectDir);
           if (!presets) {
             alert('No presets found in this file.');
             return;
@@ -4238,7 +4333,7 @@
   </div>
 
   <!-- Output Window Manager — display transforms now flow via $settings.output
-       broadcast to the output window, applied via CSS on its canvas. -->
+       broadcast to the output window and applied in its final WebGL pass. -->
   <OutputWindow
     bind:this={outputWindow}
     bind:isOpen={outputIsOpen}

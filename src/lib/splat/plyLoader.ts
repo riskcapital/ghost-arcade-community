@@ -2,6 +2,7 @@
 // Parses .ply files and detects whether they're point clouds or gaussian splats
 
 import type { SplatDataType } from '../types';
+import { loadAssetArrayBuffer } from '../utils/localAsset';
 
 export interface PLYVertex {
   x: number;
@@ -380,17 +381,7 @@ function calculateBounds(vertices: PLYVertex[]): {
 
 // Load PLY from file path or URL
 export async function loadPLY(pathOrUrl: string): Promise<PLYData> {
-  let buffer: ArrayBuffer;
-
-  // Handle URLs and app-served local object/blob URLs.
-  if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) {
-    const response = await fetch(pathOrUrl);
-    buffer = await response.arrayBuffer();
-  } else {
-    const response = await fetch(pathOrUrl);
-    buffer = await response.arrayBuffer();
-  }
-
+  const buffer = await loadAssetArrayBuffer(pathOrUrl);
   return parsePLYBuffer(buffer);
 }
 

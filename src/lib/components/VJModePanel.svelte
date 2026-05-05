@@ -38,6 +38,7 @@
   import EffectPickerModal from './EffectPickerModal.svelte';
   import SplatPanel from './SplatPanel.svelte';
   import Model3DPanel from './Model3DPanel.svelte';
+  import { getPathForFile, shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
 
   // File menu callback (wired by parent App.svelte)
   export let onFileAction: ((action: 'new' | 'open' | 'save' | 'saveAs' | 'importPresets' | 'loadDemo' | 'undo' | 'redo') => void) | null = null;
@@ -875,7 +876,9 @@
     const url = URL.createObjectURL(file);
     if (kind === 'video') {
       const video = document.createElement('video');
-      video.src = url; video.crossOrigin = 'anonymous'; video.loop = true; video.muted = true; video.playsInline = true; video.preload = 'auto';
+      video.src = url;
+      if (shouldUseAnonymousCrossOrigin(url)) video.crossOrigin = 'anonymous';
+      video.loop = true; video.muted = true; video.playsInline = true; video.preload = 'auto';
       await new Promise<void>((resolve) => { video.onloadeddata = () => resolve(); video.onerror = () => resolve(); video.load(); });
       mediaLibrary.addItem({
         id: generateUUID(),
@@ -958,6 +961,7 @@
     input.onchange = async (e) => {
       const file = (e.target as HTMLInputElement).files?.[0];
       if (!file) return;
+      const localPath = getPathForFile(file);
 
       // Capture the outgoing clip's blob URL (if any) so we can revoke after
       // the swap. Without this, overwriting a 500MB .ply on a cell accumulates
@@ -967,31 +971,33 @@
       const priorBlobUrl: string | null =
         existing?.splatContent?.filePath && existing.splatContent.filePath.startsWith('blob:')
           ? existing.splatContent.filePath
-          : existing?.model3DContent?.modelData && existing.model3DContent.modelData.startsWith?.('blob:')
-          ? existing.model3DContent.modelData
+          : existing?.model3dContent?.modelData && existing.model3dContent.modelData.startsWith?.('blob:')
+          ? existing.model3dContent.modelData
           : null;
 
       if (type === 'splat') {
-        // Use blob URL for splat files (more efficient than data URLs for binary)
-        const blobUrl = URL.createObjectURL(file);
+        const sourceUrl = localPath || URL.createObjectURL(file);
         const isSplatFormat = file.name.toLowerCase().endsWith('.splat');
         vjClipLauncher.updateClipSplatContent(layerIndex, columnIndex, {
-          filePath: blobUrl,
+          filePath: sourceUrl,
           dataType: isSplatFormat ? 'gaussian' : 'pointcloud',
           _originalFileName: file.name,  // Pass filename so Canvas can detect .splat format
+          _originalFilePath: localPath || undefined,
+          _sourceVersion: Date.now(),
         } as any);
         vjClipLauncher.setClip(layerIndex, columnIndex, {
           ...($vjClipLauncher.clipGrid[layerIndex]?.[columnIndex] as VJClip),
           name: file.name.replace(/\.[^.]+$/, ''),
         });
       } else {
-        // Use blob URL for 3D model files
-        const blobUrl = URL.createObjectURL(file);
+        const modelSource = localPath || URL.createObjectURL(file);
         const ext = file.name.split('.').pop()?.toLowerCase() || 'glb';
         vjClipLauncher.updateClipModel3DContent(layerIndex, columnIndex, {
-          modelData: blobUrl,
+          modelData: modelSource,
           modelFormat: ext as Model3DFormat,
           modelName: file.name,
+          _originalFilePath: localPath || undefined,
+          _sourceVersion: Date.now(),
         });
         vjClipLauncher.setClip(layerIndex, columnIndex, {
           ...($vjClipLauncher.clipGrid[layerIndex]?.[columnIndex] as VJClip),

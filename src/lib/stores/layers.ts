@@ -1,6 +1,6 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Layer, Project, WarpCorners, Point2D, BezierPoint, MediaSource, BlendMode, WarpMode, Effect, EffectType, EffectParams, LayerType, SVGContent, SVGFillMode, SVGColorMode, ColorContent, LightPaintingContent, LightPaintingStroke, CropRegion, LayerShape, LayerShapeType, Composition, VJModeState, VJDeck, Timeline, TimelineClip, TextContent, TextAnimation, SplatContent, Model3DContent, MediaTrayFolder, StagePreset, SVKeyboardPreset, EdgeEffect, EdgeEffectsConfig } from '../types';
-import { createLayer, createProject, createDefaultCorners, createMeshGrid, createLinesLayer, createSVGLayer, createColorLayer, createLightPaintingLayer, createTextLayer, createSplatLayer, createDefaultSVGContent, createDefaultCropRegion, createDefaultLayerShape, createDefaultVJModeState, createDefaultTimeline, generateUUID, createDefaultModel3DContent, createDefaultEdgeEffect, convertShapeToCustom, createGroupLayer } from '../types';
+import { createLayer, createProject, createDefaultCorners, createMeshGrid, createLinesLayer, createSVGLayer, createColorLayer, createLightPaintingLayer, createTextLayer, createSplatLayer, createDefaultSplatContent, createDefaultSVGContent, createDefaultCropRegion, createDefaultLayerShape, createDefaultVJModeState, createDefaultTimeline, generateUUID, createDefaultModel3DContent, createDefaultEdgeEffect, convertShapeToCustom, createGroupLayer } from '../types';
 import type { GroupConfig } from '../types';
 import { mediaLibrary } from './media';
 import { vjClipLauncher, type VJClip, type VJBlock, type VJLayerState, DEFAULT_VJ_LAYERS, DEFAULT_VJ_COLUMNS } from './vjClipLauncher';
@@ -1920,15 +1920,50 @@ void main() {
 
     // ========== Import Presets from Another .ghost-arcade File ==========
 
-    importPresetsFromFile(data: unknown): { stagePresets: StagePreset[]; svKeyboardPresets: SVKeyboardPreset[] } | null {
+    importPresetsFromFile(data: unknown, projectDir?: string): { stagePresets: StagePreset[]; svKeyboardPresets: SVKeyboardPreset[] } | null {
       try {
         const parsed = data as { project?: { stagePresets?: StagePreset[]; svKeyboardPresets?: SVKeyboardPreset[] } };
         if (!parsed.project) return null;
+
+        const pathToFileUrl = (p: string): string => {
+          let urlPath = p.replace(/\\/g, '/');
+          if (!urlPath.startsWith('/')) urlPath = '/' + urlPath;
+          return 'file://' + urlPath
+            .replace(/%/g, '%25')
+            .replace(/ /g, '%20')
+            .replace(/#/g, '%23')
+            .replace(/\?/g, '%3F');
+        };
+
+        const resolveSrc = (src: string): string => {
+          if (!src) return src;
+          if (/^(https?:|blob:|data:|file:)/i.test(src)) return src;
+          let absPath: string | null = null;
+          if (/^[A-Z]:\\/i.test(src) || src.startsWith('/')) {
+            absPath = src;
+          } else if (projectDir) {
+            const sep = projectDir.includes('\\') ? '\\' : '/';
+            const base = projectDir.endsWith(sep) ? projectDir : projectDir + sep;
+            absPath = base + src.replace(/^\.\//, '');
+          }
+          return absPath ? pathToFileUrl(absPath) : src;
+        };
+
+        const importPresetLayer = (layer: any): Layer => {
+          const imported = this._importLayer(layer);
+          if (imported.source?.src) imported.source.src = resolveSrc(imported.source.src);
+          if (imported.splatContent?.filePath) imported.splatContent.filePath = resolveSrc(imported.splatContent.filePath);
+          if (imported.splatContent?.texturePath) imported.splatContent.texturePath = resolveSrc(imported.splatContent.texturePath);
+          if (imported.model3dContent?.modelData) imported.model3dContent.modelData = resolveSrc(imported.model3dContent.modelData);
+          return imported;
+        };
+
         return {
           stagePresets: (parsed.project.stagePresets || []).map(p => ({
             ...p,
             id: generateUUID(), // Re-ID to avoid collisions
             scope: 'project' as const,
+            layers: (p.layers || []).map((layer: any) => importPresetLayer(layer)),
           })),
           svKeyboardPresets: (parsed.project.svKeyboardPresets || []).map(p => ({
             ...p,
@@ -3125,6 +3160,8 @@ void main() {
       const currentVjClipLauncher = get(vjClipLauncher);
       const exportClip = (clip: VJClip | null) => {
         if (!clip) return null;
+        const splatContent = clip.splatContent ? { ...clip.splatContent } : undefined;
+        const model3dContent = clip.model3dContent ? { ...clip.model3dContent } : undefined;
         return {
           id: clip.id,
           type: clip.type,
@@ -3136,6 +3173,8 @@ void main() {
           spoutSource: clip.spoutSource,
           effectSource: clip.effectSource,
           jsAnimation: clip.jsAnimation,
+          splatContent,
+          model3dContent,
           effects: clip.effects || [],
           // Exclude runtime objects: videoElement / iframeElement / synthVisionCanvas
         };
@@ -3373,6 +3412,23 @@ void main() {
           return absPath ? pathToFileUrl(absPath) : src;
         };
 
+        const importLayerWithResolvedAssets = (layer: any): Layer => {
+          const imported = this._importLayer(layer);
+          if (imported.source?.src) imported.source.src = resolveSrc(imported.source.src);
+          if (imported.splatContent?.filePath) imported.splatContent.filePath = resolveSrc(imported.splatContent.filePath);
+          if (imported.splatContent?.texturePath) imported.splatContent.texturePath = resolveSrc(imported.splatContent.texturePath);
+          if (imported.model3dContent?.modelData) imported.model3dContent.modelData = resolveSrc(imported.model3dContent.modelData);
+          return imported;
+        };
+
+        const importStagePresetWithResolvedAssets = (preset: any): StagePreset => ({
+          ...preset,
+          id: preset?.id || generateUUID(),
+          name: preset?.name || 'Stage Preset',
+          createdAt: preset?.createdAt || Date.now(),
+          layers: (preset?.layers || []).map((layer: any) => importLayerWithResolvedAssets(layer)),
+        });
+
         if (!parsed.project) {
           console.error('Invalid project data: missing project object');
           return false;
@@ -3393,11 +3449,7 @@ void main() {
               name: comp.name || 'Preset',
               thumbnail: comp.thumbnail,
               createdAt: comp.createdAt || Date.now(),
-              layers: (comp.layers || []).map((layer: any) => {
-                const imported = this._importLayer(layer);
-                if (imported.source?.src) imported.source.src = resolveSrc(imported.source.src);
-                return imported;
-              }),
+              layers: (comp.layers || []).map((layer: any) => importLayerWithResolvedAssets(layer)),
               synthVision: comp.synthVision,
             })),
             decks: (vjm.decks || []).map((deck: any) => ({
@@ -3450,6 +3502,16 @@ void main() {
           // Helper to import a clip (strips runtime objects)
           const importClip = (clip: any): VJClip | null => {
             if (!clip) return null;
+            const splatContent = clip.type === 'splat'
+              ? { ...createDefaultSplatContent(), ...(clip.splatContent || {}) }
+              : undefined;
+            if (splatContent?.filePath) splatContent.filePath = resolveSrc(splatContent.filePath);
+
+            const model3dContent = clip.type === 'model3d'
+              ? { ...createDefaultModel3DContent(), ...(clip.model3dContent || {}) }
+              : undefined;
+            if (model3dContent?.modelData) model3dContent.modelData = resolveSrc(model3dContent.modelData);
+
             return {
               id: clip.id || generateUUID(),
               type: clip.type || 'image',
@@ -3462,6 +3524,8 @@ void main() {
               effectSource: clip.effectSource,
               jsAnimation: clip.jsAnimation,
               effects: clip.effects || [],
+              splatContent,
+              model3dContent,
               // videoElement will be recreated at runtime
             };
           };
@@ -3566,14 +3630,10 @@ void main() {
           width: proj.width || 1920,
           height: proj.height || 1080,
           selectedLayerId: proj.selectedLayerId || null,
-          layers: (proj.layers || []).map(layer => {
-            const imported = this._importLayer(layer);
-            if (imported.source?.src) imported.source.src = resolveSrc(imported.source.src);
-            return imported;
-          }),
+          layers: (proj.layers || []).map(layer => importLayerWithResolvedAssets(layer)),
           vjMode: importedVjMode,
           mediaFolders: normalizeMediaTrayFolders(proj.mediaFolders),
-          stagePresets: (proj as any).stagePresets || [],
+          stagePresets: ((proj as any).stagePresets || []).map((preset: any) => importStagePresetWithResolvedAssets(preset)),
           svKeyboardPresets: (proj as any).svKeyboardPresets || [],
         };
 
