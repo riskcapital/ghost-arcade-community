@@ -36,8 +36,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # svelte-check holds the entire AST tree of every .svelte + .ts file
+      # in memory at once. With 1000+ files in this repo it occasionally
+      # blows past Node's default 4 GB heap on the standard ubuntu-latest
+      # runner — the process gets SIGKILL'd mid-stream, exit code 1, and
+      # the only signature in the log is a truncated source-context line.
+      # See v1.0.9 main-push run 25457254346 for the exact symptom. Pinning
+      # the heap to 6 GB takes us well clear of that boundary.
       - name: Svelte and TypeScript check
         run: npm run check
+        env:
+          NODE_OPTIONS: "--max-old-space-size=6144"
 
       - name: Unit tests
         run: npm test
