@@ -31,6 +31,10 @@ const ALLOWED_IPC_COMMANDS = new Set([
   'output_fullscreen_external', 'output_toggle_fullscreen', 'output_set_cursor',
   'show_main_window',
 
+  // SRC tab Capture chooser — enumerates screens + app windows
+  // with thumbnails so the renderer can show a Zoom/Slack-style picker.
+  'screen_sources_list',
+
   // File system
   'pick_directory', 'save_file_binary', 'save_file_text', 'save_project_dialog',
   'read_project_file', 'read_local_asset_file',

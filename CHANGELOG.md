@@ -7,6 +7,41 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ---
 
+## [1.0.9] — 2026-05-06
+
+### Changed
+
+- **SRC tab → Capture** now opens a chooser modal listing every screen
+  AND every open application window with a thumbnail preview, instead of
+  silently grabbing the primary monitor. Click a tile to start the
+  capture. Behaves like the screen-share picker in Zoom / Slack / OBS.
+
+### Why this matters
+
+  Previously the only thing you could capture was your primary display,
+  which produced an infinite-mirror feedback loop if Ghost Arcade itself
+  was on that screen and offered no way to bring in a specific Chrome
+  tab, Resolume preview, game window, AI generator output, etc. The new
+  picker gives you the full set of capturable surfaces the OS knows
+  about, plus app icons + window titles so you can pick the right one.
+
+### Technical notes
+
+- New main-process IPC `screen_sources_list` enumerates
+  `desktopCapturer.getSources({ types: ['screen', 'window'] })` with
+  320×180 PNG thumbnails + window app icons.
+- Renderer uses `getUserMedia({ video: { mandatory: { chromeMediaSource:
+  'desktop', chromeMediaSourceId } } })` to pin the stream to the chosen
+  source. Capped at 1080p / 60 fps by default.
+- The legacy `setDisplayMediaRequestHandler` now passes
+  `useSystemPicker: true` (macOS 15+ only) and includes `'window'` in
+  its fallback type list. The audio analyzer's system-audio capture
+  still routes through the handler unchanged.
+- Custom modal styled to match the existing Shader Library modal —
+  same backdrop, same card grid layout.
+
+---
+
 ## [1.0.0] — 2026-05-02
 
 First stable release of Ghost Arcade Community. Promotes the
