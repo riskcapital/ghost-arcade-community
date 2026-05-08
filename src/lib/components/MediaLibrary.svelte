@@ -179,7 +179,7 @@
   function applyToLayer(item: MediaSource) {
     if (!$selectedLayerId) return;
 
-    // Create a fresh copy for the layer
+    // Create a fresh source wrapper for the layer
     const layerSource: MediaSource = {
       id: generateUUID(),
       type: item.type,
@@ -189,15 +189,54 @@
     };
 
     if (item.type === 'video') {
-      const video = document.createElement('video');
-      if (shouldUseAnonymousCrossOrigin(item.src)) video.crossOrigin = 'anonymous';
-      video.src = item.src;
-      video.loop = true;
-      video.muted = true;
-      video.playsInline = true;
-      video.autoplay = true;
-      video.play();
+      // Reuse the library item's existing <video> element instead of
+      // creating a new one. Pre-fix: every apply-to-layer click made a
+      // fresh element, fresh `.src=` load, fresh GPU upload — and on
+      // rapid back-and-forth between two clips, the editor was racing
+      // 4+ in-flight video loads at a time and the textures stuck on
+      // garbage frames. Reusing the library element lets the texture
+      // cache survive a switch through B and back to A as a near-
+      // instant texture swap.
+      let video = item.videoElement as HTMLVideoElement | undefined;
+      if (!video) {
+        // Fallback for items added before this code path existed.
+        video = document.createElement('video');
+        if (shouldUseAnonymousCrossOrigin(item.src)) video.crossOrigin = 'anonymous';
+        video.loop = true;
+        video.muted = true;
+        video.playsInline = true;
+        video.preload = 'auto';
+        video.src = item.src;
+        item.videoElement = video;
+        libraryItems = libraryItems.map(i => i.id === item.id ? { ...i, videoElement: video } : i);
+      } else {
+        video.loop = true;
+        video.muted = true;
+        video.playsInline = true;
+        video.preload = 'auto';
+      }
+
+      // Pause the OUTGOING layer's video so we don't keep stale clips
+      // decoding in the background. Each library item's videoElement is
+      // independent, so this only pauses the previously-applied clip.
+      const prevLayer = $project.layers.find((l) => l.id === $selectedLayerId);
+      const prevVideo = prevLayer?.source?.videoElement;
+      if (prevVideo && prevVideo !== video) {
+        try { prevVideo.pause(); } catch { /* */ }
+      }
+
+      // Always restart from frame 0 on apply. User expectation: clicking
+      // a clip means "play this NOW from the beginning" — same as VJ
+      // and Performer. Without this, the library element kept playing
+      // in the background between applies, so re-applying picked up
+      // wherever it had advanced to (16s in, 4s in, etc.) instead of
+      // restarting cleanly.
+      try { video.currentTime = 0; } catch { /* */ }
+
       layerSource.videoElement = video;
+      if (video.paused) {
+        video.play().catch(() => { /* AbortError on rapid re-apply is fine */ });
+      }
     }
 
     project.setLayerSource($selectedLayerId, layerSource);

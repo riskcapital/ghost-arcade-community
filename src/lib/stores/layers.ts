@@ -1492,6 +1492,15 @@ void main() {
     },
 
     setLayerSource(id: string, source: MediaSource | null) {
+      // Debug trace — set window.__VIDEO_DEBUG__ = true to see every
+      // setLayerSource call with the caller stack so we can localize
+      // which path is mutating layer.source mid-frame.
+      if (typeof window !== 'undefined' && (window as any).__VIDEO_DEBUG__) {
+        const stack = new Error().stack?.split('\n').slice(2, 6).map(s => s.trim()).join(' / ') || 'no-stack';
+        const srcShort = (source?.src || '').slice(-40);
+        console.log(`[setLayerSource] layer=${id.slice(0, 8)} type=${source?.type ?? 'null'} src=${srcShort} stack=${stack}`);
+      }
+
       update((project) => {
         // Find the old layer source to clean up
         const oldLayer = project.layers.find(l => l.id === id);

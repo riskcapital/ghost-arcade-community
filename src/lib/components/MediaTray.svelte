@@ -1026,52 +1026,51 @@
         };
 
         if (item.type === 'video' && item.videoElement) {
-          const video = document.createElement('video');
-          if (shouldUseAnonymousCrossOrigin(item.src)) {
-            video.crossOrigin = 'anonymous';
-          }
+          // Reuse the library item's existing <video> element. See
+          // MediaLibrary.applyToLayer for the full rationale — short
+          // version: avoids racing fresh loads on rapid back-and-forth.
+          const video = item.videoElement;
           video.loop = true;
           video.muted = true;
           video.playsInline = true;
           video.preload = 'auto';
-          // IMPORTANT: set crossOrigin BEFORE src. Setting `.src` initiates
-          // the resource selection algorithm; setting crossOrigin afterward
-          // is too late for the request to use anonymous mode and triggers
-          // a re-load which races any pending play().
-          video.src = item.src;
 
-          // Wait for video to have enough data. Don't call `.load()` —
-          // the `.src=` setter above already initiated the load. Calling
-          // `.load()` here issues a SECOND in-flight request that aborts
-          // the first + any pending play() with AbortError on Chromium 130
-          // (Electron 42). That's the "rapid double-click freezes the
-          // video on first frame" symptom.
-          await new Promise<void>((resolve, reject) => {
-            const onReady = () => { cleanup(); resolve(); };
-            const onError = () => { cleanup(); reject(new Error('Video load failed')); };
-            const cleanup = () => {
-              video.removeEventListener('loadeddata', onReady);
-              video.removeEventListener('canplaythrough', onReady);
-              video.removeEventListener('error', onError);
-            };
-            video.addEventListener('loadeddata', onReady, { once: true });
-            video.addEventListener('canplaythrough', onReady, { once: true });
-            video.addEventListener('error', onError, { once: true });
-            // Safety net for already-loaded sources (e.g., when applying a
-            // library item whose URL was preloaded with a previous element).
-            if (video.readyState >= 2) onReady();
-          });
+          // Pause the OUTGOING layer's video so stale clips don't keep
+          // decoding in the background.
+          const prevLayer = $project.layers.find((l) => l.id === layerId);
+          const prevVideo = prevLayer?.source?.videoElement;
+          if (prevVideo && prevVideo !== video) {
+            try { prevVideo.pause(); } catch { /* */ }
+          }
 
-          // Start playing
-          try {
-            await video.play();
-            await new Promise(resolve => requestAnimationFrame(resolve));
-          } catch (e) {
-            // AbortError here is benign — happens when the user re-applies
-            // before this play() resolved. The new apply will set up its
-            // own play() promise.
-            if ((e as DOMException)?.name !== 'AbortError') {
-              console.warn('Video autoplay blocked:', e);
+          // Always restart from frame 0 on apply — see MediaLibrary fix.
+          try { video.currentTime = 0; } catch { /* */ }
+
+          // Wait until the element has decoded data. If already played
+          // at least one frame this resolves synchronously.
+          if (video.readyState < 2) {
+            await new Promise<void>((resolve, reject) => {
+              const onReady = () => { cleanup(); resolve(); };
+              const onError = () => { cleanup(); reject(new Error('Video load failed')); };
+              const cleanup = () => {
+                video.removeEventListener('loadeddata', onReady);
+                video.removeEventListener('canplaythrough', onReady);
+                video.removeEventListener('error', onError);
+              };
+              video.addEventListener('loadeddata', onReady, { once: true });
+              video.addEventListener('canplaythrough', onReady, { once: true });
+              video.addEventListener('error', onError, { once: true });
+            });
+          }
+
+          if (video.paused) {
+            try {
+              await video.play();
+              await new Promise(resolve => requestAnimationFrame(resolve));
+            } catch (e) {
+              if ((e as DOMException)?.name !== 'AbortError') {
+                console.warn('Video autoplay blocked:', e);
+              }
             }
           }
 

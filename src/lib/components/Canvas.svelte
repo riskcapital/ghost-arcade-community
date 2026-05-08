@@ -110,8 +110,18 @@
   // Track loaded textures (with LRU eviction)
   const textureCache = new Map<string, THREE.Texture>();
   const TEXTURE_CACHE_MAX = 64;
+  // Expose for DevTools debugging:
+  //   __textureCache.size                    — entry count
+  //   [...__textureCache.keys()]             — keys, oldest first (LRU order)
+  //   __textureCache.get(key)?.image?.src    — what backs each entry
+  //   __VIDEO_DEBUG__ = true                 — turn on per-frame video state logging
+  if (typeof window !== 'undefined') {
+    (window as any).__textureCache = textureCache;
+    (window as any).__loadingTextures = null; // assigned below
+  }
   // Track textures being loaded to avoid duplicate async loads
   const loadingTextures = new Set<string>();
+  if (typeof window !== 'undefined') (window as any).__loadingTextures = loadingTextures;
   // Track texture loads that hard-failed (missing video file, CORS error, bad
   // shader compile) so we don't retry them on every frame. Without this, a
   // single VJ clip pointing at a deleted file or expired blob URL floods the
@@ -123,18 +133,87 @@
   const FAILED_TEXTURE_LOG_LIMIT = 3; // only log each bad key a few times
   const failedTextureLogCount = new Map<string, number>();
 
-  /** Evict oldest entries from textureCache when it exceeds the max size */
-  function evictTextureCache() {
+  /** Bump a textureCache entry to the most-recent position so true-LRU
+   *  eviction won't drop it. Map iteration order is insertion order, so
+   *  delete + re-set moves the entry to the end. Called on every cache
+   *  hit + every fresh insert. */
+  function touchTextureCacheEntry(key: string): void {
+    const tex = textureCache.get(key);
+    if (!tex) return;
+    textureCache.delete(key);
+    textureCache.set(key, tex);
+  }
+
+  /** Evict least-recently-used entries from textureCache, but NEVER
+   *  evict a texture that's currently referenced by an active layer.
+   *
+   *  Pre-fix: simple FIFO eviction disposed the texture for the FIRST
+   *  clip the user added once the cache hit 64 entries — but if that
+   *  clip was still mapped on a layer ("left it playing for a bit"),
+   *  its now-disposed VideoTexture stayed assigned and visually froze
+   *  on whatever frame the GPU last sampled. Subsequent clip switches
+   *  also returned disposed cached textures. That's the "all rest
+   *  frozen when I launched them" symptom.
+   *
+   *  Pinned-set accounting: walks $layers + $vjOutputLayers and
+   *  collects every textureCacheKey currently in use. Eviction skips
+   *  pinned keys entirely; if every entry is pinned the cache simply
+   *  grows past TEXTURE_CACHE_MAX (logged so we can diagnose runaway). */
+  function evictTextureCache(): void {
     if (textureCache.size <= TEXTURE_CACHE_MAX) return;
+
+    // Build set of textureCacheKeys currently in use by ANY active layer.
+    // Mirror the lookupKey derivation in updateTexturesSync exactly so
+    // the pinned set matches the keys textureCache actually uses.
+    const pinned = new Set<string>();
+    const collectFrom = (layerList: Layer[] | null | undefined) => {
+      if (!layerList) return;
+      for (const layer of layerList) {
+        if (!layer?.source) continue;
+        const isAIGenerated = layer.source.src === 'ai-generated' || layer.source.src === 'js-animation';
+        const isSynthVision =
+          layer.source.type === 'synthvision' ||
+          (!layer.source.src && (layer.source as any).synthVisionCanvas) ||
+          (layer.source.type === 'threejs' && (layer.source as any).threejsCanvas && !layer.source.src);
+        const isVJVideoLayer =
+          layer.source.type === 'video' &&
+          typeof layer.id === 'string' && layer.id.startsWith('vj-layer-');
+        const textureCacheKey =
+          (isAIGenerated || isSynthVision) ? layer.source.id
+          : isVJVideoLayer ? `${layer.id}:${layer.source.src}`
+          : layer.source.src;
+        const isShader = layer.source.type === 'shader';
+        const lookupKey = isShader ? `${layer.id}:${textureCacheKey}` : textureCacheKey;
+        if (lookupKey) pinned.add(lookupKey);
+      }
+    };
+    collectFrom(get(layers));
+    collectFrom(get(vjOutputLayers));
+
+    const targetCount = Math.max(TEXTURE_CACHE_MAX, pinned.size);
+    if (textureCache.size <= targetCount) return;
+
     const keysToDelete: string[] = [];
     for (const key of textureCache.keys()) {
-      if (textureCache.size - keysToDelete.length <= TEXTURE_CACHE_MAX) break;
+      if (textureCache.size - keysToDelete.length <= targetCount) break;
+      if (pinned.has(key)) continue;
       keysToDelete.push(key);
     }
+
+    if ((window as any).__VIDEO_DEBUG__ && keysToDelete.length > 0) {
+      console.log('[textureCache] evicting', keysToDelete.length, 'of', textureCache.size,
+        '— pinned:', pinned.size, 'keys:', keysToDelete);
+    }
+
     for (const key of keysToDelete) {
       const tex = textureCache.get(key);
       if (tex) tex.dispose();
       textureCache.delete(key);
+    }
+
+    if (textureCache.size > targetCount && (window as any).__VIDEO_DEBUG__) {
+      console.warn('[textureCache] cache size', textureCache.size,
+        'exceeds target', targetCount, '— all entries pinned, allowing growth');
     }
   }
 
@@ -1081,7 +1160,21 @@
         layer.source.type === 'synthvision' ||
         (!layer.source.src && (layer.source as any).synthVisionCanvas) ||
         (layer.source.type === 'threejs' && (layer.source as any).threejsCanvas && !layer.source.src);
-      const textureCacheKey = (isAIGenerated || isSynthVision) ? layer.source.id : layer.source.src;
+      // VJ video layers need their own cache namespace because each VJ
+      // clip has its own private HTMLVideoElement (built by
+      // vjClipLauncher.prepareClipVideo, keyed per-clip), separate from
+      // any element the same URL has in the mapping-mode media library.
+      // If we shared a URL-keyed cache between the two, VJ layers would
+      // get back a texture wrapping mapping-mode's videoElement —
+      // visible as a frozen frame from whatever the mapping clip last
+      // sampled. Namespacing by layer.id + src keeps them isolated.
+      const isVJVideoLayer =
+        layer.source.type === 'video' &&
+        typeof layer.id === 'string' && layer.id.startsWith('vj-layer-');
+      const textureCacheKey =
+        (isAIGenerated || isSynthVision) ? layer.source.id
+        : isVJVideoLayer ? `${layer.id}:${layer.source.src}`
+        : layer.source.src;
       // Layer-specific cache key for shader instances (which may have per-layer state)
       const shaderCacheKey = `${layer.id}:${textureCacheKey}`;
 
@@ -1114,6 +1207,11 @@
         } else {
           // Always assign - the source object reference may have changed due to store updates
           layer.source.texture = cachedTexture;
+          // Bump this entry to most-recent so true-LRU eviction won't
+          // drop a texture that's actively in use. Without this, the
+          // first-inserted texture gets evicted even when it's still
+          // mapped on a layer ("clip frozen after playing for a bit").
+          touchTextureCacheEntry(lookupKey);
         }
       }
       // If not loading yet, start async load — skip entirely if a previous
@@ -1141,6 +1239,61 @@
         const ready = !!vEl && vEl.readyState >= 2 /* HAVE_CURRENT_DATA */ && vEl.videoWidth > 0 && vEl.videoHeight > 0;
         if (layer.source.texture && ready) {
           (layer.source.texture as THREE.VideoTexture).needsUpdate = true;
+        }
+
+        // Video health watchdog — gated behind window.__VIDEO_DEBUG__ so
+        // it doesn't spam in normal sessions. Logs once per state change
+        // per layer. Set `__VIDEO_DEBUG__ = true` in DevTools to enable.
+        if ((window as any).__VIDEO_DEBUG__) {
+          const tex = layer.source.texture as THREE.VideoTexture | null | undefined;
+          const dbgKey = `__vidDbg_${layer.id}`;
+          const elIdHandle = vEl as any;
+          if (vEl && !elIdHandle.__gaElId) {
+            elIdHandle.__gaElId = `el#${Math.floor(Math.random() * 0xffff).toString(16)}`;
+          }
+          const cur = {
+            ready,
+            paused: !!vEl?.paused,
+            readyState: vEl?.readyState ?? -1,
+            videoWidth: vEl?.videoWidth ?? 0,
+            videoHeight: vEl?.videoHeight ?? 0,
+            currentTime: vEl?.currentTime?.toFixed(2) ?? 'n/a',
+            duration: vEl?.duration?.toFixed(2) ?? 'n/a',
+            srcShort: (vEl?.src || '').slice(-50),
+            hasTexture: !!tex,
+            textureImageMatchesElement: tex?.image === vEl,
+            elId: elIdHandle?.__gaElId ?? 'n/a',                     // identifies WHICH HTMLVideoElement
+            textureImageElId: (tex?.image as any)?.__gaElId ?? 'n/a', // and which one the texture wraps
+          };
+          const prev = (window as any)[dbgKey];
+          const changed = !prev ||
+            prev.ready !== cur.ready ||
+            prev.paused !== cur.paused ||
+            prev.readyState !== cur.readyState ||
+            prev.hasTexture !== cur.hasTexture ||
+            prev.textureImageMatchesElement !== cur.textureImageMatchesElement ||
+            prev.srcShort !== cur.srcShort ||
+            prev.elId !== cur.elId ||
+            prev.textureImageElId !== cur.textureImageElId;
+          if (changed) {
+            (window as any)[dbgKey] = cur;
+            // Use full layer.id (not sliced) so we don't alias two layers.
+            // Print critical mismatch flags inline so Chrome's object
+            // collapse doesn't hide them behind a `…`.
+            const matchTag = cur.textureImageMatchesElement ? 'OK' : 'MISMATCH';
+            console.log(
+              `[VIDEO] layer=${layer.id.slice(0, 8)}`,
+              `el=${cur.elId}`,
+              `texEl=${cur.textureImageElId}`,
+              `match=${matchTag}`,
+              `tex=${cur.hasTexture}`,
+              `rs=${cur.readyState}`,
+              `dim=${cur.videoWidth}x${cur.videoHeight}`,
+              `t=${cur.currentTime}`,
+              `paused=${cur.paused}`,
+              `src=${cur.srcShort}`,
+            );
+          }
         }
 
         const video = layer.source.videoElement;

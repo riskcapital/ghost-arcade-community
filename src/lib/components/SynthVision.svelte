@@ -3605,12 +3605,24 @@ void main() {
     const clipId = `perf-media-${assignment.mediaId || Date.now()}`;
 
     if (assignment.mediaType === 'video') {
-      const video = document.createElement('video');
-      video.src = assignment.mediaSrc;
+      // Reuse the library item's existing <video> element if available so
+      // rapid Performer keyboard switching doesn't churn fresh elements.
+      const libraryItem = assignment.mediaId
+        ? $mediaLibrary.find(m => m.id === assignment.mediaId)
+        : null;
+      let video = libraryItem?.videoElement as HTMLVideoElement | undefined;
+      if (!video) {
+        video = document.createElement('video');
+        video.src = assignment.mediaSrc;
+      }
       video.loop = true;
       video.muted = true;
       video.playsInline = true;
-      video.play().catch(() => {});
+      // Always restart from frame 0 on key press. User expectation:
+      // pressing a Performer key plays the clip from the beginning,
+      // not from wherever it left off.
+      try { video.currentTime = 0; } catch { /* */ }
+      if (video.paused) video.play().catch(() => {});
       const clip: VJClip = {
         id: clipId,
         type: 'video',
