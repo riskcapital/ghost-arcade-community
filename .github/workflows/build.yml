@@ -37,16 +37,18 @@ jobs:
         run: npm ci
 
       # svelte-check holds the entire AST tree of every .svelte + .ts file
-      # in memory at once. With 1000+ files in this repo it occasionally
-      # blows past Node's default 4 GB heap on the standard ubuntu-latest
-      # runner — the process gets SIGKILL'd mid-stream, exit code 1, and
-      # the only signature in the log is a truncated source-context line.
-      # See v1.0.9 main-push run 25457254346 for the exact symptom. Pinning
-      # the heap to 6 GB takes us well clear of that boundary.
+      # in memory at once. With 1000+ files in this repo it blows past
+      # Node's default 4 GB heap on the standard ubuntu-latest runner —
+      # the process gets SIGKILL'd mid-stream, exit code 1, and the only
+      # signature in the log is a truncated source-context line. We raised
+      # to 6 GB in cc86717; the Electron 42 + three.js 0.184 upgrade in
+      # v1.1.0 pushed the dep graph past that boundary too (failed runs
+      # 25531337100 + 25531475774 had the same truncated signature).
+      # 8 GB sits comfortably below the 16 GB ubuntu-latest cap.
       - name: Svelte and TypeScript check
         run: npm run check
         env:
-          NODE_OPTIONS: "--max-old-space-size=6144"
+          NODE_OPTIONS: "--max-old-space-size=8192"
 
       - name: Unit tests
         run: npm test
