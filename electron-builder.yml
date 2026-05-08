@@ -78,15 +78,21 @@ mac:
 
 dmg:
   iconSize: 128
-  # DMG window contents — Applications symlink + the .app bundle.
-  # If the `path:` is omitted on a `type: file` entry electron-builder errors
-  # out (was a stale Pro-config holdover). Letting electron-builder auto-place
-  # the .app by omitting the second entry entirely.
+  # DMG window contents — both the Applications symlink AND the .app bundle
+  # entry are required, even though `type: file` doesn't carry a path
+  # (electron-builder picks up the freshly-built .app by convention). The
+  # earlier comment claiming auto-placement worked when the `file` entry
+  # was omitted was wrong: v1.1.0 (CI run 25531529086) shipped 944 KB DMGs
+  # that contained ONLY the /Applications symlink and no actual app
+  # bundle. Adding the file entry back, mirroring Pro's working config.
   contents:
     - x: 380
       y: 170
       type: link
       path: /Applications
+    - x: 130
+      y: 170
+      type: file
 
 # ─── Linux ─────────────────────────────────────────────────────────────────
 # AppImage is the most portable target. Forks can add deb / rpm here.
