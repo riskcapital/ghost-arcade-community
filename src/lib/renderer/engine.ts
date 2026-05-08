@@ -121,8 +121,10 @@ export class RenderEngine {
   private _copyScene: THREE.Scene;
   private _tempColor: THREE.Color;
 
-  // Watermark overlay (free/demo tier) — grid of darkened logo outlines with random illumination
-  private watermarkEnabled: boolean = true;
+  // Watermark overlay is disabled in Community. The remaining implementation
+  // is kept only so shared renderer code stays close to Pro without letting a
+  // stale license path turn it on.
+  private watermarkEnabled: boolean = false;
   private watermarkScene: THREE.Scene | null = null;
   private watermarkQuad: THREE.Mesh | null = null;
   private watermarkMaterial: THREE.ShaderMaterial | null = null;
@@ -293,9 +295,9 @@ export class RenderEngine {
   // initializes the renderer doesn't see a 404 on /icon-shrink.png (a stale
   // ill Visuals brand file that no longer ships).
 
-  /** Enable or disable the watermark overlay (controlled by license store) */
-  setWatermark(enabled: boolean): void {
-    this.watermarkEnabled = enabled;
+  /** Community never renders a demo watermark. */
+  setWatermark(_enabled: boolean): void {
+    this.watermarkEnabled = false;
   }
 
   private initWatermark(): void {

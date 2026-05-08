@@ -1497,14 +1497,22 @@ void main() {
         const oldLayer = project.layers.find(l => l.id === id);
         const oldSource = oldLayer?.source;
 
-        // Dispose old JS animation context if it exists and is different from the new one
-        if (oldSource && oldSource.jsAnimation && oldSource.id !== source?.id) {
+        // Compare on `src` (the actual media identity), NOT on `id` (a fresh
+        // UUID generated on every apply-to-layer call). Pre-fix: clicking
+        // the same video twice generated two MediaSource objects with the
+        // same src but different UUIDs → the second click disposed the
+        // freshly-loaded texture, then a fresh load raced the previous one's
+        // pending play() → "video freezes on first frame" bug.
+        const srcChanged = !!oldSource && oldSource.src !== source?.src;
+
+        // Dispose old JS animation context if the underlying source genuinely changed
+        if (oldSource && oldSource.jsAnimation && srcChanged) {
           console.log('Disposing old JS animation context:', oldSource.id, oldSource.name);
           disposeJSAnimationContext(oldSource.id);
         }
 
-        // Dispose old texture if it exists
-        if (oldSource?.texture && oldSource.id !== source?.id) {
+        // Dispose old texture only when the underlying source genuinely changed
+        if (oldSource?.texture && srcChanged) {
           console.log('Disposing old texture for:', oldSource.name);
           oldSource.texture.dispose();
         }
@@ -2978,6 +2986,7 @@ void main() {
           id: layer.source.id,
           type: layer.source.type,
           src: layer.source.src,
+          localPath: layer.source.localPath,
           name: layer.source.name,
           shaderCode: layer.source.shaderCode,
           shaderInputs: layer.source.shaderInputs,
@@ -3151,6 +3160,7 @@ void main() {
         id: item.id,
         name: item.name,
         src: item.src,
+        localPath: item.localPath,
         type: item.type,
         thumbnail: item.thumbnail,
         // Exclude: videoElement, texture
@@ -3167,6 +3177,7 @@ void main() {
           type: clip.type,
           name: clip.name,
           src: clip.src,
+          localPath: clip.localPath,
           thumbnail: clip.thumbnail,
           shaderCode: clip.shaderCode,
           shaderValues: clip.shaderValues,
@@ -3415,6 +3426,9 @@ void main() {
         const importLayerWithResolvedAssets = (layer: any): Layer => {
           const imported = this._importLayer(layer);
           if (imported.source?.src) imported.source.src = resolveSrc(imported.source.src);
+          if ((imported.source as any)?.localPath) {
+            imported.source!.localPath = (imported.source as any).localPath;
+          }
           if (imported.splatContent?.filePath) imported.splatContent.filePath = resolveSrc(imported.splatContent.filePath);
           if (imported.splatContent?.texturePath) imported.splatContent.texturePath = resolveSrc(imported.splatContent.texturePath);
           if (imported.model3dContent?.modelData) imported.model3dContent.modelData = resolveSrc(imported.model3dContent.modelData);
@@ -3482,6 +3496,7 @@ void main() {
               id: item.id || generateUUID(),
               name: item.name || 'Media',
               src: resolveSrc(item.src || ''),
+              localPath: item.localPath,
               type: item.type || 'image',
               thumbnail: item.thumbnail,
               // Runtime properties will be recreated when media is loaded
@@ -3517,6 +3532,7 @@ void main() {
               type: clip.type || 'image',
               name: clip.name || 'Clip',
               src: resolveSrc(clip.src || ''),
+              localPath: clip.localPath,
               thumbnail: clip.thumbnail,
               shaderCode: clip.shaderCode,
               shaderValues: clip.shaderValues || {},

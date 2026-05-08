@@ -11,11 +11,18 @@ silenceThreeSerializationNoise();
 initErrorReporter();
 
 // Determine which app to mount based on URL mode parameter.
-//   ?mode=output  -> second-display canvas-only output window
-//   (anything else) -> full editor UI
+//   ?mode=webrtc-display -> presentation-only WebRTC receiver (CURRENT DEFAULT
+//                            for the output window — the editor publishes its
+//                            canvas via same-process WebRTC and this window
+//                            renders the stream into a single <video> element).
+//   ?mode=output         -> legacy second-renderer fallback (kept for safety;
+//                            re-enable from electron/main.js if WebRTC ever
+//                            misbehaves on a specific machine).
+//   (anything else)      -> full editor UI
 //
 const urlParams = new URLSearchParams(window.location.search);
-const isOutputWindow = urlParams.get('mode') === 'output';
+const mode = urlParams.get('mode');
+const isOutputWindow = mode === 'output' || mode === 'webrtc-display';
 
 if (isOutputWindow && !(window as any).__OUTPUT_WINDOW_MODE__) {
   // contextBridge.exposeInMainWorld may have already set this read-only;
@@ -24,7 +31,10 @@ if (isOutputWindow && !(window as any).__OUTPUT_WINDOW_MODE__) {
 }
 
 async function init() {
-  if (isOutputWindow) {
+  if (mode === 'webrtc-display') {
+    const { default: OutputDisplayApp } = await import('./OutputDisplayApp.svelte');
+    mount(OutputDisplayApp, { target: document.getElementById('app')! });
+  } else if (mode === 'output') {
     const { default: OutputWindowApp } = await import('./OutputWindowApp.svelte');
     mount(OutputWindowApp, { target: document.getElementById('app')! });
   } else {

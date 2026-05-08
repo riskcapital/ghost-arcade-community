@@ -38,7 +38,7 @@
   import EffectPickerModal from './EffectPickerModal.svelte';
   import SplatPanel from './SplatPanel.svelte';
   import Model3DPanel from './Model3DPanel.svelte';
-  import { getPathForFile, shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
+  import { createSharedMediaUrl, getPathForFile, shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
 
   // File menu callback (wired by parent App.svelte)
   export let onFileAction: ((action: 'new' | 'open' | 'save' | 'saveAs' | 'importPresets' | 'loadDemo' | 'undo' | 'redo') => void) | null = null;
@@ -858,12 +858,28 @@
 
   async function vjCaptureVideoThumb(video: HTMLVideoElement): Promise<string> {
     return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value: string) => {
+        if (settled) return;
+        settled = true;
+        video.onseeked = null;
+        resolve(value);
+      };
       const grab = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = 120; canvas.height = 68;
-        const ctx = canvas.getContext('2d');
-        if (ctx) { ctx.drawImage(video, 0, 0, canvas.width, canvas.height); resolve(canvas.toDataURL('image/jpeg', 0.7)); }
-        else resolve('');
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = 120; canvas.height = 68;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            finish(canvas.toDataURL('image/jpeg', 0.7));
+          } else {
+            finish('');
+          }
+        } catch (err) {
+          console.warn('[VJ Media] Thumbnail capture skipped:', err);
+          finish('');
+        }
       };
       if (video.readyState >= 2) { video.currentTime = 0.1; video.onseeked = grab; setTimeout(() => { if (video.onseeked) grab(); }, 300); }
       else { video.onloadeddata = () => { video.currentTime = 0.1; video.onseeked = grab; }; }
@@ -873,22 +889,31 @@
   async function vjAddMediaFile(file: File) {
     const kind = vjMediaGetType(file);
     if (!kind) { console.warn('[VJ Media] Unsupported file type:', file.name); return; }
-    const url = URL.createObjectURL(file);
     if (kind === 'video') {
+      const localMedia = await createSharedMediaUrl(file);
+      const url = localMedia.url;
       const video = document.createElement('video');
-      video.src = url;
       if (shouldUseAnonymousCrossOrigin(url)) video.crossOrigin = 'anonymous';
       video.loop = true; video.muted = true; video.playsInline = true; video.preload = 'auto';
-      await new Promise<void>((resolve) => { video.onloadeddata = () => resolve(); video.onerror = () => resolve(); video.load(); });
+      video.src = url;
+      // `.src=` setter already initiated the load. Don't call `.load()`.
+      await new Promise<void>((resolve) => {
+        const done = () => { video.removeEventListener('loadeddata', done); video.removeEventListener('error', done); resolve(); };
+        video.addEventListener('loadeddata', done, { once: true });
+        video.addEventListener('error', done, { once: true });
+        if (video.readyState >= 2) done();
+      });
       mediaLibrary.addItem({
         id: generateUUID(),
         name: file.name,
         src: url,
+        localPath: localMedia.localPath,
         type: 'video',
         videoElement: video,
         thumbnail: await vjCaptureVideoThumb(video),
       } as any);
     } else if (kind === 'image') {
+      const url = URL.createObjectURL(file);
       mediaLibrary.addItem({
         id: generateUUID(),
         name: file.name,
@@ -1122,6 +1147,7 @@
           type: draggedClip.type,
           name: media.name,
           src: media.src,
+          localPath: media.localPath,
           thumbnail: media.thumbnail,
         };
         vjClipLauncher.setClip(layerIndex, columnIndex, vjClip);
@@ -1500,13 +1526,14 @@
       thumbnail: '',
     } as any);
 
+    // `.src=` setter already started the load — don't call `.load()`.
     await new Promise<void>((resolve) => {
       let resolved = false;
       const done = () => { if (!resolved) { resolved = true; resolve(); } };
       video.oncanplaythrough = done;
       video.onloadeddata = done;
       video.onerror = done;
-      video.load();
+      if (video.readyState >= 2) done();
       setTimeout(done, 5000);
     });
 

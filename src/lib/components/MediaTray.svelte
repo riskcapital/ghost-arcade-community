@@ -15,7 +15,7 @@
   import { downloadRecording } from '../recording/recorder';
   import { updateJSAnimationParams } from '../renderer/js-animation';
   import { canUseFluidGen } from '../stores/license';
-  import { shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
+  import { createSharedMediaUrl, shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
   import AIShaderGenerator from './AIShaderGenerator.svelte';
   import AIVideoGenerator from './AIVideoGenerator.svelte';
   import ShaderLibrary from './ShaderLibrary.svelte';
@@ -239,11 +239,7 @@
       liveSources = [...liveSources, source];
     } catch (err) {
       console.error('Failed to start capture for', picked.name, err);
-      showToast({
-        type: 'error',
-        title: 'Capture failed',
-        message: `Could not capture "${picked.name}". The window may have closed or the OS denied access.`,
-      });
+      showToast(`Capture failed: could not capture "${picked.name}". The window may have closed or the OS denied access.`);
     }
   }
 
@@ -829,12 +825,14 @@
   }
 
   async function addMediaFile(file: File) {
-    const url = URL.createObjectURL(file);
     const mediaType = getMediaType(file);
+    const localMedia = mediaType === 'video'
+      ? await createSharedMediaUrl(file)
+      : { url: URL.createObjectURL(file), localPath: undefined };
+    const url = localMedia.url;
 
     if (mediaType === 'video') {
       const video = document.createElement('video');
-      video.src = url;
       if (shouldUseAnonymousCrossOrigin(url)) {
         video.crossOrigin = 'anonymous';
       }
@@ -842,16 +840,23 @@
       video.muted = true;
       video.playsInline = true;
       video.preload = 'auto';
+      // src goes LAST so crossOrigin is in place when the load kicks off.
+      video.src = url;
 
+      // The `.src=` setter already started the load. Don't call `.load()`
+      // — a second in-flight request races any pending play() and throws
+      // AbortError on Chromium 130 (Electron 42).
       await new Promise<void>((resolve) => {
-        video.onloadeddata = () => resolve();
-        video.load();
+        const done = () => { video.removeEventListener('loadeddata', done); resolve(); };
+        video.addEventListener('loadeddata', done, { once: true });
+        if (video.readyState >= 2) done();
       });
 
       const item: MediaItem = {
         id: generateUUID(),
         name: file.name,
         src: url,
+        localPath: localMedia.localPath,
         type: 'video',
         videoElement: video,
         thumbnail: await captureVideoThumbnail(video),
@@ -912,16 +917,28 @@
 
   async function captureVideoThumbnail(video: HTMLVideoElement): Promise<string> {
     return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value: string) => {
+        if (settled) return;
+        settled = true;
+        video.onseeked = null;
+        resolve(value);
+      };
       const capture = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = 120;
-        canvas.height = 68;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          resolve(canvas.toDataURL('image/jpeg', 0.7));
-        } else {
-          resolve('');
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = 120;
+          canvas.height = 68;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            finish(canvas.toDataURL('image/jpeg', 0.7));
+          } else {
+            finish('');
+          }
+        } catch (err) {
+          console.warn('[MediaTray] Thumbnail capture skipped:', err);
+          finish('');
         }
       };
 
@@ -937,7 +954,7 @@
       } else {
         // Video not loaded yet - wait for it, then capture current frame
         video.onloadeddata = () => capture();
-        setTimeout(() => resolve(''), 3000); // Ultimate fallback
+        setTimeout(() => finish(''), 3000); // Ultimate fallback
       }
     });
   }
@@ -1004,12 +1021,12 @@
           id: `${item.id}-${layerId}-${Date.now()}`,
           type: item.type,
           src: item.src,
+          localPath: item.localPath,
           name: item.name,
         };
 
         if (item.type === 'video' && item.videoElement) {
           const video = document.createElement('video');
-          video.src = item.src;
           if (shouldUseAnonymousCrossOrigin(item.src)) {
             video.crossOrigin = 'anonymous';
           }
@@ -1017,21 +1034,45 @@
           video.muted = true;
           video.playsInline = true;
           video.preload = 'auto';
+          // IMPORTANT: set crossOrigin BEFORE src. Setting `.src` initiates
+          // the resource selection algorithm; setting crossOrigin afterward
+          // is too late for the request to use anonymous mode and triggers
+          // a re-load which races any pending play().
+          video.src = item.src;
 
-          // Wait for video to have enough data
-          await new Promise<void>((resolve) => {
-            video.oncanplaythrough = () => resolve();
-            video.onloadeddata = () => resolve();
-            video.load();
+          // Wait for video to have enough data. Don't call `.load()` —
+          // the `.src=` setter above already initiated the load. Calling
+          // `.load()` here issues a SECOND in-flight request that aborts
+          // the first + any pending play() with AbortError on Chromium 130
+          // (Electron 42). That's the "rapid double-click freezes the
+          // video on first frame" symptom.
+          await new Promise<void>((resolve, reject) => {
+            const onReady = () => { cleanup(); resolve(); };
+            const onError = () => { cleanup(); reject(new Error('Video load failed')); };
+            const cleanup = () => {
+              video.removeEventListener('loadeddata', onReady);
+              video.removeEventListener('canplaythrough', onReady);
+              video.removeEventListener('error', onError);
+            };
+            video.addEventListener('loadeddata', onReady, { once: true });
+            video.addEventListener('canplaythrough', onReady, { once: true });
+            video.addEventListener('error', onError, { once: true });
+            // Safety net for already-loaded sources (e.g., when applying a
+            // library item whose URL was preloaded with a previous element).
+            if (video.readyState >= 2) onReady();
           });
 
           // Start playing
           try {
             await video.play();
-            // Wait for at least one frame to be rendered
             await new Promise(resolve => requestAnimationFrame(resolve));
           } catch (e) {
-            console.warn('Video autoplay blocked:', e);
+            // AbortError here is benign — happens when the user re-applies
+            // before this play() resolved. The new apply will set up its
+            // own play() promise.
+            if ((e as DOMException)?.name !== 'AbortError') {
+              console.warn('Video autoplay blocked:', e);
+            }
           }
 
           source.videoElement = video;
@@ -1726,13 +1767,15 @@
 
     // Wait (up to 5s) for the video to load, then capture a thumbnail
     // and patch the existing library item so its tile shows a preview.
+    // `.src=` already initiated the load — don't call `.load()` (would
+    // race a fresh load on Chromium 130).
     await new Promise<void>((resolve) => {
       let resolved = false;
       const done = () => { if (!resolved) { resolved = true; resolve(); } };
       video.oncanplaythrough = done;
       video.onloadeddata = done;
       video.onerror = done;
-      video.load();
+      if (video.readyState >= 2) done();
       setTimeout(done, 5000);
     });
 
@@ -1946,12 +1989,13 @@
     video.preload = 'auto';
     video.src = blobUrl;
 
+    // `.src=` setter already started the load — don't call `.load()`.
     await new Promise<void>((resolve) => {
       let resolved = false;
       const done = () => { if (!resolved) { resolved = true; resolve(); } };
       video.onloadeddata = done;
       video.onerror = done;
-      video.load();
+      if (video.readyState >= 2) done();
       setTimeout(done, 5000);
     });
 

@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
   import { RenderEngine, loadImageTexture, createVideoTexture, getThreeJSIframeContext, createThreeJSIframeContext, getJSAnimationContext, createJSAnimationContext } from '../renderer/engine';
-  import { shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
+  import { registerLocalMediaSource, shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
   import { project, layers } from '../stores/layers';
   import { mediaLibrary } from '../stores/media';
   import { vjOutputLayers, vjClipLauncher } from '../stores/vjClipLauncher';
@@ -30,6 +30,7 @@
   import { audioStore, getLastRawAnalysis } from '../stores/audio';
   import { audioTextures } from '../audio/audioTextures';
   import { initStateBroadcast, destroyStateBroadcast } from '$lib/sync/stateBroadcast';
+  import { startOutputPixelBroadcast, stopOutputPixelBroadcast } from '$lib/sync/outputPixelBroadcast';
   import { hasWatermark } from '$lib/stores/license';
   import { fpsStore } from '$lib/stores/fps';
 
@@ -366,6 +367,21 @@
     // Output windows receive project state from the main window.
     if (!isOsrMode && !isOutputMode) {
       initStateBroadcast('sender');
+    }
+
+    // WebRTC output transport (single-renderer pattern). The editor
+    // exposes its main canvas as a same-process MediaStream; the output
+    // window mounts OutputDisplayApp and renders the stream into a
+    // single <video srcObject>. This is the architectural target — same
+    // shape as Resolume / TouchDesigner / VDMX, where one rendering
+    // pipeline serves multiple presentation surfaces. Replaces the
+    // legacy "second renderer reads ghost-media:// URLs" path that was
+    // freezing on external displays under load.
+    //
+    // Editor-only: the output window itself shouldn't broadcast to
+    // itself.
+    if (!isOsrMode && !isOutputMode && canvas) {
+      startOutputPixelBroadcast(canvas, 60);
     }
 
     // Expose canvas to window for VJ preview
@@ -942,6 +958,7 @@
     engine?.dispose();
 
     destroyStateBroadcast();
+    stopOutputPixelBroadcast();
 
     // Dispose textures
     for (const texture of textureCache.values()) {
@@ -1108,10 +1125,21 @@
         loadTextureAsync(layer.id, layer.source, lookupKey);
       }
 
-      // Video textures need to be marked for update every frame
-      // This is critical - without this the video won't display new frames
+      // Video textures need to be marked for update every frame so the
+      // GPU resamples each decoded frame — but ONLY when the video has
+      // actual frame data. Setting `needsUpdate=true` while the element
+      // is still loading (readyState < 2 OR videoWidth === 0) makes
+      // three.js call `texImage2D(..., video)` on an empty source, which
+      // returns `WebGL: INVALID_VALUE: texImage2D: no video` and leaves
+      // the texture in an undefined state. On Electron 42 / three.js
+      // 0.184 that broken texture is what shows up as the horizontal
+      // lines / black bars on the output window after rapid clip
+      // switching. The check is cheap (two property reads) and skips the
+      // upload until the next frame arrives.
       if (layer.source.type === 'video') {
-        if (layer.source.texture) {
+        const vEl = layer.source.videoElement;
+        const ready = !!vEl && vEl.readyState >= 2 /* HAVE_CURRENT_DATA */ && vEl.videoWidth > 0 && vEl.videoHeight > 0;
+        if (layer.source.texture && ready) {
           (layer.source.texture as THREE.VideoTexture).needsUpdate = true;
         }
 
@@ -1220,11 +1248,25 @@
     }
   }
 
-  // Cleanup shader resources for a layer
+  // Cleanup shader resources for a layer.
+  //
+  // SCOPE: only the per-layer shader objects (ISF shader instance + its
+  // private render target + the per-layer key in textureCache). Does
+  // NOT touch the SHARED textureCache entry for the source's URL.
+  //
+  // Why: video clips reuse the same URL across rapid VJ-clip switches.
+  // The previous version disposed `textureCache.get(src)` here (the URL-
+  // keyed entry, not the layer-keyed one), so every clip switch tore
+  // down the VideoTexture and any future click-back had to reload the
+  // file from disk and re-upload to the GPU. That's the "rapid clip
+  // switching gets laggy" symptom — GPU resource churn + disk re-reads
+  // per click. The LRU evictor (`evictTextureCache`) already bounds the
+  // cache size, so leaving URL-keyed entries in place is safe.
   function cleanupLayerShader(layerId: string, src: string) {
     const cacheKey = `${layerId}:${src}`;
 
-    // Dispose shader instance
+    // Dispose shader instance (per-layer, can't be reused across layers
+    // because shaders carry per-layer uniform state)
     const shader = shaderInstances.get(cacheKey);
     if (shader) {
       shader.material.dispose();
@@ -1235,29 +1277,23 @@
       console.log('[Canvas] Disposed shader instance:', cacheKey);
     }
 
-    // Dispose render target
+    // Dispose shader render target (per-layer, sized per-layer's quality)
     const rt = shaderRenderTargets.get(cacheKey);
     if (rt) {
       rt.dispose();
       shaderRenderTargets.delete(cacheKey);
     }
 
-    // Dispose texture from cache (shader key format: layerId:src)
-    const texture = textureCache.get(cacheKey);
-    if (texture) {
-      texture.dispose();
+    // Dispose layer-keyed texture entry only (used by some shader paths
+    // that cache under the layer-prefixed key). Leave the URL-keyed
+    // entry alone — see comment above.
+    const layerKeyedTexture = textureCache.get(cacheKey);
+    if (layerKeyedTexture) {
+      layerKeyedTexture.dispose();
       textureCache.delete(cacheKey);
     }
 
-    // Also check non-shader key format (used by SynthVision, AI-generated, etc.)
-    // The src IS the source.id for these types
-    const altTexture = textureCache.get(src);
-    if (altTexture) {
-      altTexture.dispose();
-      textureCache.delete(src);
-      console.log('[Canvas] Disposed stale texture for source:', src);
-    }
-    loadingTextures.delete(src);
+    loadingTextures.delete(cacheKey);
   }
 
   // Async texture loading
@@ -1271,32 +1307,81 @@
       } else if (source.type === 'video') {
         // Get video element - either from source or create a new one
         let video = source.videoElement;
+        let videoSrc = source.src;
+        if (source.localPath || /^[a-zA-Z]:[\\/]/.test(source.src) || /^file:/i.test(source.src)) {
+          try {
+            videoSrc = await registerLocalMediaSource(source.localPath || source.src);
+          } catch (err) {
+            console.warn('[Canvas] Failed to register local video source, using original URL:', err);
+          }
+        }
+
+        // Track whether we created the element ourselves on this pass.
+        // Fresh elements need an explicit `.load()` kick — the src setter
+        // SHOULD auto-trigger the resource selection algorithm but in
+        // practice, for custom protocol URLs (`ghost-media://`) on
+        // Chromium 130 (Electron 42), the auto-trigger sometimes never
+        // fires loadeddata. A reused element (VJ rapid clip switch) has
+        // a load already in flight from `prepareClipVideo`, so calling
+        // `.load()` here would abort that one + any pending play() →
+        // AbortError. So: load() only on fresh creates, never on reused.
+        let isFreshElement = false;
 
         // If no video element exists, create one
         if (!video) {
           video = document.createElement('video');
-          video.src = source.src;
-          if (shouldUseAnonymousCrossOrigin(source.src)) {
+          if (shouldUseAnonymousCrossOrigin(videoSrc)) {
             video.crossOrigin = 'anonymous';
           }
+          video.src = videoSrc;
           video.loop = true;
           video.muted = true;
           video.playsInline = true;
           video.preload = 'auto';
+          isFreshElement = true;
+        } else if (source.localPath && video.getAttribute('src') !== videoSrc) {
+          video.pause();
+          if (shouldUseAnonymousCrossOrigin(videoSrc)) {
+            video.crossOrigin = 'anonymous';
+          } else {
+            video.removeAttribute('crossorigin');
+          }
+          // Setting `.src` re-runs the resource selection algorithm. We
+          // don't call `.load()` here too — a second in-flight load
+          // request, on Chromium 130+, races with any pending play() and
+          // throws AbortError. Pre-fix this caused VJ video clip
+          // switching to glitch out on rapid clicks.
+          video.src = videoSrc;
+        }
 
-          // Wait for video to load
+        if (video.readyState < 2) {
+          // Wait for video to be decoded enough to sample a frame.
           await new Promise<void>((resolve, reject) => {
-            video!.onloadeddata = () => resolve();
-            video!.onerror = () => reject(new Error('Video failed to load'));
-            video!.load();
+            const v = video!;
+            const onLoaded = () => { cleanup(); resolve(); };
+            const onError = () => { cleanup(); reject(new Error(`Video failed to load: ${videoSrc}`)); };
+            const cleanup = () => {
+              v.removeEventListener('loadeddata', onLoaded);
+              v.removeEventListener('error', onError);
+            };
+            v.addEventListener('loadeddata', onLoaded, { once: true });
+            v.addEventListener('error', onError, { once: true });
+            // Fresh elements: kick the load explicitly. Reused elements
+            // already have a load in flight — see big comment above.
+            if (isFreshElement) {
+              v.load();
+            }
           });
+        }
 
+        if (!source.videoElement) {
           // Store reference on the layer's source
           const currentLayers = $layers;
           const layer = currentLayers.find(l => l.id === layerId);
           if (layer?.source) {
             layer.source.videoElement = video;
           }
+          source.videoElement = video;
         }
 
         // Wait for video to have actual frame data
@@ -1495,9 +1580,14 @@
       if (mediaItem) {
         // If we already have a texture cached for this media item, use it
         if (mediaItem.texture) {
-          // Update video texture if needed
+          // Update video texture if needed — only when the underlying
+          // <video> has decoded a frame, otherwise the GPU upload throws
+          // INVALID_VALUE on Electron 42 / three.js 0.184.
           if (mediaItem.type === 'video' && mediaItem.texture instanceof THREE.VideoTexture) {
-            mediaItem.texture.needsUpdate = true;
+            const mv = mediaItem.videoElement;
+            if (mv && mv.readyState >= 2 && mv.videoWidth > 0 && mv.videoHeight > 0) {
+              mediaItem.texture.needsUpdate = true;
+            }
           }
           // Also cache locally for fast access
           imageInputTextureCache.set(localCacheKey, mediaItem.texture);

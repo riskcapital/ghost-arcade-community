@@ -191,6 +191,7 @@ function sendFullState() {
       clipGrid: stripClipGrid(block.clipGrid),
     }));
     const safeClipGrid = stripClipGrid(vjState.clipGrid);
+    const safeLayerStates = stripLayerStates(vjState.layerStates);
 
     channel.postMessage({
       type: 'project-state',
@@ -200,7 +201,7 @@ function sendFullState() {
           blocks: safeBlocks,
           activeBlockId: vjState.activeBlockId,
           clipGrid: safeClipGrid,
-          layerStates: vjState.layerStates,
+          layerStates: safeLayerStates,
           compositionEffects: vjState.compositionEffects,
           masterOpacity: vjState.masterOpacity,
           isOpen: vjState.isOpen,
@@ -265,6 +266,7 @@ function stripClip(clip: any): any {
     videoElement: _v,
     iframeElement: _i,
     threejsCanvas: _t,
+    texture: _texture,
     ...rest
   } = clip;
   return rest;
@@ -272,6 +274,13 @@ function stripClip(clip: any): any {
 
 function stripClipGrid(grid: any[][]): any[][] {
   return grid.map(row => row.map(stripClip));
+}
+
+function stripLayerStates(layerStates: any[]): any[] {
+  return layerStates.map(layerState => ({
+    ...layerState,
+    activeClip: stripClip(layerState.activeClip),
+  }));
 }
 
 function doBroadcastVJState() {
@@ -290,6 +299,7 @@ function doBroadcastVJState() {
       clipGrid: stripClipGrid(block.clipGrid),
     }));
     const safeClipGrid = stripClipGrid(vjState.clipGrid);
+    const safeLayerStates = stripLayerStates(vjState.layerStates);
 
     channel.postMessage({
       type: 'vj-state',
@@ -297,7 +307,7 @@ function doBroadcastVJState() {
         blocks: safeBlocks,
         activeBlockId: vjState.activeBlockId,
         clipGrid: safeClipGrid,
-        layerStates: vjState.layerStates,
+        layerStates: safeLayerStates,
         compositionEffects: vjState.compositionEffects,
         masterOpacity: vjState.masterOpacity,
         isOpen: vjState.isOpen,

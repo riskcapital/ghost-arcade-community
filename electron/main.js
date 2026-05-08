@@ -15,7 +15,7 @@
  * No licensing. No telemetry. No external phone-home.
  */
 
-import { app, BrowserWindow, desktopCapturer, ipcMain, screen, session, shell } from 'electron';
+import { app, BrowserWindow, desktopCapturer, ipcMain, protocol, screen, session, shell } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
@@ -23,15 +23,42 @@ import { createRequire } from 'module';
 import fs from 'fs';
 import net from 'net';
 import crypto from 'crypto';
+import { Readable } from 'stream';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 
+const LOCAL_MEDIA_SCHEME = 'ghost-media';
+const localMediaByToken = new Map();
+const localMediaTokenByPath = new Map();
+const localMediaExts = new Set([
+  '.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi',
+  '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif',
+]);
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: LOCAL_MEDIA_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+]);
+
+const EXPERIMENTAL_GPU_PRESENT = process.argv.includes('--experimental-gpu-present') || process.env.GA_EXPERIMENTAL_GPU_PRESENT === '1';
 // GPU / DPI / autoplay tuning. Projection-safe mode avoids forcing Chromium
 // presentation paths that can flicker or band on some Windows projector stacks.
-const PROJECTION_SAFE_MODE = process.argv.includes('--projection-safe-mode') || process.env.GA_PROJECTION_SAFE_MODE === '1';
-const EXPERIMENTAL_GPU_PRESENT = process.argv.includes('--experimental-gpu-present') || process.env.GA_EXPERIMENTAL_GPU_PRESENT === '1';
+// Default it on for Community; users can opt into the faster/less conservative
+// path with --experimental-gpu-present or GA_PROJECTION_SAFE_MODE=0.
+const PROJECTION_SAFE_MODE =
+  !EXPERIMENTAL_GPU_PRESENT &&
+  !process.argv.includes('--disable-projection-safe-mode') &&
+  process.env.GA_PROJECTION_SAFE_MODE !== '0';
 app.commandLine.appendSwitch('force_high_performance_gpu');
 if (PROJECTION_SAFE_MODE) {
   app.commandLine.appendSwitch('disable-zero-copy');
@@ -271,6 +298,133 @@ function stopServer() {
   if (sidecarProcess) {
     try { sidecarProcess.kill(); } catch { /* */ }
     sidecarProcess = null;
+  }
+}
+
+function normalizeLocalMediaPath(rawPath) {
+  if (typeof rawPath !== 'string' || !rawPath) {
+    throw new Error('Invalid media path');
+  }
+
+  const normalized = /^file:/i.test(rawPath)
+    ? fileURLToPath(rawPath)
+    : path.normalize(rawPath);
+
+  if (!path.isAbsolute(normalized)) {
+    throw new Error('Media path must be absolute');
+  }
+
+  const ext = path.extname(normalized).toLowerCase();
+  if (!localMediaExts.has(ext)) {
+    throw new Error(`Unsupported media type: ${ext || '(none)'}`);
+  }
+
+  const realPath = fs.realpathSync(normalized);
+  const stat = fs.statSync(realPath);
+  if (!stat.isFile()) {
+    throw new Error('Media path is not a file');
+  }
+
+  return realPath;
+}
+
+function localMediaMimeType(filePath) {
+  switch (path.extname(filePath).toLowerCase()) {
+    case '.mp4':
+    case '.m4v': return 'video/mp4';
+    case '.mov': return 'video/quicktime';
+    case '.webm': return 'video/webm';
+    case '.mkv': return 'video/x-matroska';
+    case '.avi': return 'video/x-msvideo';
+    case '.png': return 'image/png';
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg';
+    case '.webp': return 'image/webp';
+    case '.bmp': return 'image/bmp';
+    case '.gif': return 'image/gif';
+    default: return 'application/octet-stream';
+  }
+}
+
+function registerLocalMediaPath(rawPath) {
+  const mediaPath = normalizeLocalMediaPath(rawPath);
+  let token = localMediaTokenByPath.get(mediaPath);
+  if (!token) {
+    token = crypto.randomUUID();
+    localMediaTokenByPath.set(mediaPath, token);
+    localMediaByToken.set(token, mediaPath);
+  }
+
+  const fileName = encodeURIComponent(path.basename(mediaPath));
+  return `${LOCAL_MEDIA_SCHEME}://${token}/${fileName}`;
+}
+
+function parseRangeHeader(rangeHeader, size) {
+  if (!rangeHeader) return null;
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader);
+  if (!match) return null;
+
+  let start;
+  let end;
+  if (match[1] === '' && match[2] !== '') {
+    const suffix = Number(match[2]);
+    if (!Number.isFinite(suffix) || suffix <= 0) return null;
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(match[1]);
+    end = match[2] === '' ? size - 1 : Number(match[2]);
+  }
+
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= size) {
+    return null;
+  }
+
+  return { start, end: Math.min(end, size - 1) };
+}
+
+async function handleLocalMediaRequest(request) {
+  try {
+    const url = new URL(request.url);
+    const mediaPath = localMediaByToken.get(url.hostname);
+    if (!mediaPath) {
+      return new Response('Media token not registered', { status: 404 });
+    }
+
+    const stat = await fs.promises.stat(mediaPath);
+    const size = stat.size;
+    const range = parseRangeHeader(request.headers.get('range'), size);
+    const start = range?.start ?? 0;
+    const end = range?.end ?? Math.max(0, size - 1);
+    const status = range ? 206 : 200;
+    const contentLength = Math.max(0, end - start + 1);
+    const headers = new Headers({
+      'Accept-Ranges': 'bytes',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Range',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+      'Content-Type': localMediaMimeType(mediaPath),
+      'Content-Length': String(contentLength),
+      'Cache-Control': 'no-store',
+    });
+
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers });
+    }
+
+    if (range) {
+      headers.set('Content-Range', `bytes ${start}-${end}/${size}`);
+    }
+
+    if (request.method === 'HEAD') {
+      return new Response(null, { status, headers });
+    }
+
+    const stream = fs.createReadStream(mediaPath, { start, end });
+    return new Response(Readable.toWeb(stream), { status, headers });
+  } catch (err) {
+    console.error('[LocalMedia] request failed:', err?.message || err);
+    return new Response('Failed to read media', { status: 500 });
   }
 }
 
@@ -556,6 +710,15 @@ function registerIpcHandlers() {
     }
   });
 
+  ipcMain.handle('register_local_media_file', async (_, args) => {
+    try {
+      const url = registerLocalMediaPath(args?.path);
+      return { success: true, url };
+    } catch (err) {
+      return { success: false, error: err?.message || String(err) };
+    }
+  });
+
   ipcMain.handle('pick_directory', async () => {
     const { dialog } = require('electron');
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -823,18 +986,18 @@ function setupPermissions() {
       ? "script-src 'self' 'unsafe-inline' blob:"
       : "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:";
     const csp = [
-      "default-src 'self' blob: data:",
+      `default-src 'self' blob: data: ${LOCAL_MEDIA_SCHEME}:`,
       // Vite dev needs eval for HMR. Production keeps inline scripts for
       // trusted local animation surfaces, but does not allow runtime eval.
       scriptSrc,
       "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data: blob: file: https:",
-      "media-src 'self' blob: data: file:",
+      `img-src 'self' data: blob: file: ${LOCAL_MEDIA_SCHEME}: https:`,
+      `media-src 'self' blob: data: file: ${LOCAL_MEDIA_SCHEME}:`,
       "font-src 'self' data:",
       // Local WS server (9001) + HTTP server (9002) for mobile companion.
       // Vite dev server (1420) for development. github for cloud shader
       // catalog metadata fetches.
-      "connect-src 'self' blob: ws://localhost:* ws://127.0.0.1:* http://localhost:* http://127.0.0.1:* https://github.com https://*.githubusercontent.com https://api.github.com",
+      `connect-src 'self' blob: ${LOCAL_MEDIA_SCHEME}: ws://localhost:* ws://127.0.0.1:* http://localhost:* http://127.0.0.1:* https://github.com https://*.githubusercontent.com https://api.github.com`,
       "worker-src 'self' blob:",
       "child-src 'self' blob:",
       "object-src 'none'",
@@ -1066,6 +1229,12 @@ function createOutputWindow(args = {}) {
     width: winW, height: winH, x: winX, y: winY,
     title: 'Ghost Arcade Output',
     resizable: true,
+    // BrowserWindow width/height normally include the titlebar/frame. For a
+    // projection output that means the actual WebGL canvas can become e.g.
+    // 1262x673 when the user requested 1280x720, causing fractional Chromium
+    // compositor scaling and visible horizontal artifacts. Keep the content
+    // area exact.
+    useContentSize: true,
     frame: true,
     fullscreen,
     // macOS: simpleFullscreen avoids the Mission Control space transition
@@ -1075,7 +1244,7 @@ function createOutputWindow(args = {}) {
     autoHideMenuBar: true,
     skipTaskbar: false,
     backgroundColor: '#000000',
-    hasShadow: true,
+    hasShadow: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -1086,11 +1255,22 @@ function createOutputWindow(args = {}) {
   });
   outputWindow.setMenuBarVisibility(false);
 
+  // WebRTC output transport (single-renderer pattern, like Resolume /
+  // TouchDesigner / VDMX): the output window mounts OutputDisplayApp,
+  // which receives the editor canvas as a same-process WebRTC stream and
+  // displays it via a single <video srcObject> element. This avoids the
+  // legacy second-renderer's `ghost-media://` cross-window contention
+  // that was producing freezes on external displays + projectors. The
+  // legacy `?mode=output` path is preserved in main.ts as a fallback so
+  // setting `GHOSTARCADE_OUTPUT_LEGACY=1` in the environment can flip
+  // back if a specific machine misbehaves.
+  const useLegacyOutput = process.env.GHOSTARCADE_OUTPUT_LEGACY === '1';
+  const outputMode = useLegacyOutput ? 'output' : 'webrtc-display';
   const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:1420';
   if (!app.isPackaged) {
-    outputWindow.loadURL(`${devUrl}?mode=output`);
+    outputWindow.loadURL(`${devUrl}?mode=${outputMode}`);
   } else {
-    outputWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query: { mode: 'output' } });
+    outputWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query: { mode: outputMode } });
   }
 
   // Same nav hardening as the main window; output should never load anything
@@ -1136,6 +1316,7 @@ app.on('second-instance', () => {
 
 app.whenReady().then(async () => {
   setupPermissions();
+  protocol.handle(LOCAL_MEDIA_SCHEME, handleLocalMediaRequest);
   registerIpcHandlers();
   await startNodeServer();
   createMainWindow();

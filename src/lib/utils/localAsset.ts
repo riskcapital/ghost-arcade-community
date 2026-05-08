@@ -29,7 +29,41 @@ export function isLocalFileSource(source: string | null | undefined): boolean {
 }
 
 export function shouldUseAnonymousCrossOrigin(source: string | null | undefined): boolean {
-  return !!source && /^https?:/i.test(source);
+  return !!source && (/^https?:/i.test(source) || /^ghost-media:/i.test(source));
+}
+
+export function isSharedLocalMediaUrl(source: string | null | undefined): boolean {
+  return !!source && /^ghost-media:/i.test(source);
+}
+
+export async function registerLocalMediaSource(source: string): Promise<string> {
+  if (!isLocalFileSource(source) || typeof window === 'undefined') {
+    return source;
+  }
+
+  const api = (window as any).electronAPI;
+  if (!api?.invoke) return source;
+
+  const result = await api.invoke('register_local_media_file', { path: source });
+  if (!result?.success || !result.url) {
+    throw new Error(result?.error || 'Failed to register local media file');
+  }
+  return result.url;
+}
+
+export async function createSharedMediaUrl(file: File): Promise<{ url: string; localPath?: string; revoke: () => void }> {
+  const localPath = getPathForFile(file);
+  if (localPath) {
+    try {
+      const url = await registerLocalMediaSource(localPath);
+      return { url, localPath, revoke: () => {} };
+    } catch (err) {
+      console.warn('[LocalMedia] Falling back to blob URL:', err);
+    }
+  }
+
+  const url = URL.createObjectURL(file);
+  return { url, localPath: localPath || undefined, revoke: () => URL.revokeObjectURL(url) };
 }
 
 function bytesToArrayBuffer(bytes: unknown): ArrayBuffer {

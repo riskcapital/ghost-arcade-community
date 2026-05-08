@@ -8,6 +8,7 @@ import { createDefaultSplatContent, createDefaultModel3DContent } from '../types
 import { createThreeJSIframeContext, getThreeJSIframeContext, createJSAnimationContext } from '../renderer/engine';
 import { keyframeTimeline } from './keyframeTimeline';
 import { parseISF } from '../isf/parser';
+import { shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
 
 // Cache parsed ISF shader inputs per shader code to avoid re-parsing every frame
 const vjShaderInputCache = new Map<string, ISFInputDef[]>();
@@ -41,6 +42,7 @@ export interface VJClip {
   type: 'shader' | 'video' | 'image' | 'threejs' | 'p5js' | 'jsanimation' | 'synthvision' | 'spout' | 'effect' | 'splat' | 'model3d';
   name: string;
   src: string;
+  localPath?: string;
   thumbnail?: string;
   // For shaders
   shaderCode?: string;
@@ -181,6 +183,72 @@ const videoElementCache = new Map<string, HTMLVideoElement>();
 // Cache for VJ source objects (keeps textures persistent)
 const vjSourceCache = new Map<string, MediaSource>();
 
+function prepareClipVideo(clip: VJClip | null | undefined): HTMLVideoElement | null {
+  if (!clip || clip.type !== 'video') return null;
+
+  let videoEl = videoElementCache.get(clip.id) || clip.videoElement;
+  if (!videoEl) {
+    videoEl = document.createElement('video');
+    videoElementCache.set(clip.id, videoEl);
+  }
+
+  if (videoEl.getAttribute('src') !== clip.src) {
+    videoEl.pause();
+    // IMPORTANT: set crossOrigin BEFORE src. The `.src=` setter initiates
+    // the load — changing crossOrigin after that point would force a second
+    // in-flight load.
+    if (shouldUseAnonymousCrossOrigin(clip.src)) {
+      videoEl.crossOrigin = 'anonymous';
+    } else {
+      videoEl.removeAttribute('crossorigin');
+    }
+    // The `.src=` setter triggers the resource selection algorithm. Don't
+    // call `.load()` afterward — a second in-flight request races any
+    // pending play() and throws AbortError on Chromium 130 (Electron 42).
+    // That was the "VJ video freezes on rapid clip switch" symptom.
+    videoEl.src = clip.src;
+  }
+
+  videoEl.loop = true;
+  videoEl.muted = true;
+  videoEl.playsInline = true;
+  videoEl.preload = 'auto';
+  clip.videoElement = videoEl;
+  return videoEl;
+}
+
+function pauseClipVideo(clip: VJClip | null | undefined): void {
+  if (!clip || clip.type !== 'video') return;
+  const videoEl = videoElementCache.get(clip.id) || clip.videoElement;
+  try { videoEl?.pause(); } catch {}
+}
+
+function syncVideoPlaybackForState(state: VJClipLauncherState, restartIds = new Set<string>()): void {
+  const activeVideoIds = new Set<string>();
+  if (state.isLive && !state.stoppedAll) {
+    for (const layerState of state.layerStates) {
+      const clip = layerState.activeClip;
+      if (clip?.type === 'video' && !layerState.mute) {
+        activeVideoIds.add(clip.id);
+        const videoEl = prepareClipVideo(clip);
+        if (!videoEl) continue;
+        if (restartIds.has(clip.id)) {
+          try { videoEl.currentTime = 0; } catch {}
+        }
+        if (videoEl.paused) {
+          videoEl.play().catch(e => console.warn('VJ video play failed:', e));
+        }
+      }
+    }
+  }
+
+  for (const [clipId, videoEl] of videoElementCache) {
+    if (!activeVideoIds.has(clipId)) {
+      try { videoEl.pause(); } catch {}
+    }
+  }
+}
+
 // Create the store
 function createVJClipLauncherStore() {
   const { subscribe, set, update } = writable<VJClipLauncherState>(createDefaultState());
@@ -214,16 +282,7 @@ function createVJClipLauncherStore() {
 
         // If setting a video, create/get the video element
         if (clip && clip.type === 'video') {
-          let videoEl = videoElementCache.get(clip.id);
-          if (!videoEl) {
-            videoEl = document.createElement('video');
-            videoEl.src = clip.src;
-            videoEl.loop = true;
-            videoEl.muted = true;
-            videoEl.play().catch(e => console.warn('Video autoplay failed:', e));
-            videoElementCache.set(clip.id, videoEl);
-          }
-          clip.videoElement = videoEl;
+          prepareClipVideo(clip);
         }
 
         // If setting a threejs clip (built-in), create/get the iframe context
@@ -260,6 +319,7 @@ function createVJClipLauncherStore() {
         // Remove stale source cache entry for this clip
         const oldClip = state.clipGrid[layerIndex]?.[columnIndex];
         if (oldClip) {
+          pauseClipVideo(oldClip);
           vjSourceCache.delete(`vj-${layerIndex}-${oldClip.id}`);
         }
 
@@ -284,6 +344,7 @@ function createVJClipLauncherStore() {
 
         return { ...state, clipGrid: newGrid, layerStates: newLayerStates, blocks: newBlocks };
       });
+      syncVideoPlaybackForState(get({ subscribe }));
     },
 
     /** Clear all synthvision clips from the grid — called when VJ mode closes to prevent stale canvas refs */
@@ -317,6 +378,7 @@ function createVJClipLauncherStore() {
     // Trigger a clip (activate it on its layer)
     triggerClip(layerIndex: number, columnIndex: number) {
       let didTrigger = false;
+      const restartIds = new Set<string>();
       update(state => {
         const newLayerStates = [...state.layerStates];
         const clip = state.clipGrid[layerIndex][columnIndex];
@@ -328,6 +390,11 @@ function createVJClipLauncherStore() {
           // Just keep it active - no change needed
           return state;
         } else if (clip) {
+          if (currentActiveClip?.type === 'video') pauseClipVideo(currentActiveClip);
+          if (clip.type === 'video') {
+            prepareClipVideo(clip);
+            restartIds.add(clip.id);
+          }
           // Trigger the clip - store it in activeClip for playback
           newLayerStates[layerIndex] = {
             ...newLayerStates[layerIndex],
@@ -341,6 +408,7 @@ function createVJClipLauncherStore() {
       });
       // Restart keyframe timeline from the beginning so clip animations play from t=0
       if (didTrigger) {
+        syncVideoPlaybackForState(get({ subscribe }), restartIds);
         keyframeTimeline.seek(0);
         keyframeTimeline.play();
       }
@@ -349,11 +417,19 @@ function createVJClipLauncherStore() {
     // Trigger an entire column (all layers at once)
     triggerColumn(columnIndex: number) {
       let didTrigger = false;
+      const restartIds = new Set<string>();
       update(state => {
         const newLayerStates = state.layerStates.map((layerState, layerIndex) => {
           // Only activate if there's a clip in that slot
           const clip = state.clipGrid[layerIndex][columnIndex];
           if (clip) {
+            if (layerState.activeClip?.type === 'video' && layerState.activeClip.id !== clip.id) {
+              pauseClipVideo(layerState.activeClip);
+            }
+            if (clip.type === 'video') {
+              prepareClipVideo(clip);
+              restartIds.add(clip.id);
+            }
             didTrigger = true;
             return { ...layerState, activeColumn: columnIndex, activeClip: clip };
           }
@@ -363,6 +439,7 @@ function createVJClipLauncherStore() {
         return { ...state, layerStates: newLayerStates, stoppedAll: false };
       });
       if (didTrigger) {
+        syncVideoPlaybackForState(get({ subscribe }), restartIds);
         keyframeTimeline.seek(0);
         keyframeTimeline.play();
       }
@@ -372,17 +449,21 @@ function createVJClipLauncherStore() {
     stopLayer(layerIndex: number) {
       update(state => {
         const newLayerStates = [...state.layerStates];
+        pauseClipVideo(newLayerStates[layerIndex]?.activeClip);
         newLayerStates[layerIndex] = { ...newLayerStates[layerIndex], activeColumn: null, activeClip: null };
         return { ...state, layerStates: newLayerStates };
       });
+      syncVideoPlaybackForState(get({ subscribe }));
     },
 
     // Stop all clips — suppresses all VJ output to black
     stopAll() {
       update(state => {
+        for (const layerState of state.layerStates) pauseClipVideo(layerState.activeClip);
         const newLayerStates = state.layerStates.map(ls => ({ ...ls, activeColumn: null, activeClip: null }));
         return { ...state, layerStates: newLayerStates, stoppedAll: true };
       });
+      syncVideoPlaybackForState(get({ subscribe }));
     },
 
     // Set layer opacity
@@ -410,6 +491,7 @@ function createVJClipLauncherStore() {
         newLayerStates[layerIndex] = { ...newLayerStates[layerIndex], solo: !newLayerStates[layerIndex].solo };
         return { ...state, layerStates: newLayerStates };
       });
+      syncVideoPlaybackForState(get({ subscribe }));
     },
 
     // Toggle layer mute
@@ -419,6 +501,7 @@ function createVJClipLauncherStore() {
         newLayerStates[layerIndex] = { ...newLayerStates[layerIndex], mute: !newLayerStates[layerIndex].mute };
         return { ...state, layerStates: newLayerStates };
       });
+      syncVideoPlaybackForState(get({ subscribe }));
     },
 
     // Set master opacity
@@ -429,11 +512,13 @@ function createVJClipLauncherStore() {
     // Toggle live mode
     toggleLive() {
       update(state => ({ ...state, isLive: !state.isLive }));
+      syncVideoPlaybackForState(get({ subscribe }));
     },
 
     // Set live mode
     setLive(isLive: boolean) {
       update(state => ({ ...state, isLive }));
+      syncVideoPlaybackForState(get({ subscribe }));
     },
 
     // Add effect to layer
@@ -1210,6 +1295,7 @@ export const vjOutputLayers = derived(
           type: mediaType,
           name: clip.name,
           src: clip.src,
+          localPath: clip.localPath,
           shaderCode: clip.shaderCode,
           shaderInputs: getShaderInputs(clip.shaderCode),
           shaderValues: clip.shaderValues || {},
@@ -1249,6 +1335,7 @@ export const vjOutputLayers = derived(
       } else {
         // Update dynamic properties
         source.shaderValues = clip.shaderValues || {};
+        source.localPath = clip.localPath;
         if (clip.videoElement) {
           source.videoElement = clip.videoElement;
         }

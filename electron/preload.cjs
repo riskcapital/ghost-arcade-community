@@ -27,7 +27,7 @@ const ALLOWED_IPC_COMMANDS = new Set([
   'companion_force_start',
 
   // Output window
-  'get_displays', 'create_output_window', 'close_output_window',
+  'get_displays', 'get_output_display_info', 'create_output_window', 'close_output_window',
   'output_fullscreen_external', 'output_toggle_fullscreen', 'output_set_cursor',
   'show_main_window',
 
@@ -37,7 +37,7 @@ const ALLOWED_IPC_COMMANDS = new Set([
 
   // File system
   'pick_directory', 'save_file_binary', 'save_file_text', 'save_project_dialog',
-  'read_project_file', 'read_local_asset_file',
+  'read_project_file', 'read_local_asset_file', 'register_local_media_file',
 
   // Cloud shader source persistence (saved to userData/shaders/)
   'save_shader_source', 'list_shader_sources', 'delete_shader_source',

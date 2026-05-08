@@ -4,6 +4,7 @@
   import { project, selectedLayerId } from '../stores/layers';
   import type { MediaSource, JSAnimationSource } from '../types';
   import { generateUUID } from '../types';
+  import { createSharedMediaUrl, shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
   import AIShaderGenerator from './AIShaderGenerator.svelte';
 
   // Library state
@@ -107,24 +108,29 @@
     if (!files) return;
 
     for (const file of files) {
-      addFileToLibrary(file);
+      void addFileToLibrary(file);
     }
     input.value = '';
   }
 
-  function addFileToLibrary(file: File) {
-    const url = URL.createObjectURL(file);
+  async function addFileToLibrary(file: File) {
     const isVideo = file.type.startsWith('video/');
+    const localMedia = isVideo
+      ? await createSharedMediaUrl(file)
+      : { url: URL.createObjectURL(file), localPath: undefined };
+    const url = localMedia.url;
 
     const item: MediaSource = {
       id: generateUUID(),
       type: isVideo ? 'video' : 'image',
       src: url,
+      localPath: localMedia.localPath,
       name: file.name,
     };
 
     if (isVideo) {
       const video = document.createElement('video');
+      if (shouldUseAnonymousCrossOrigin(url)) video.crossOrigin = 'anonymous';
       video.src = url;
       video.loop = true;
       video.muted = true;
@@ -142,7 +148,7 @@
     if (!files) return;
 
     for (const file of files) {
-      addFileToLibrary(file);
+      void addFileToLibrary(file);
     }
   }
 
@@ -178,11 +184,13 @@
       id: generateUUID(),
       type: item.type,
       src: item.src,
+      localPath: item.localPath,
       name: item.name,
     };
 
     if (item.type === 'video') {
       const video = document.createElement('video');
+      if (shouldUseAnonymousCrossOrigin(item.src)) video.crossOrigin = 'anonymous';
       video.src = item.src;
       video.loop = true;
       video.muted = true;

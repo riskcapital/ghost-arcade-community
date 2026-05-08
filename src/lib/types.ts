@@ -222,6 +222,7 @@ export interface MediaSource {
   id: string;
   type: MediaType;
   src: string; // URL or path
+  localPath?: string; // Desktop-only: original file path for cross-window local media
   name: string;
   texture?: THREE.Texture;
   videoElement?: HTMLVideoElement;

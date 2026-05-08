@@ -8,6 +8,7 @@ export interface MediaItem {
   id: string;
   name: string;
   src: string;
+  localPath?: string;
   type: 'video' | 'image';
   thumbnail?: string;
   videoElement?: HTMLVideoElement;

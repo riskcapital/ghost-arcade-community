@@ -2132,12 +2132,12 @@
   }
 
   /**
-   * Walk a project JSON and materialize every `blob:` URL into an actual
+   * Walk a project JSON and materialize every `blob:` / `ghost-media:` URL into an actual
    * sibling file at `projectDir`, replacing the JSON's `src` field with a
    * relative path like `./<filename>`. After this runs, the JSON is portable
    * — anyone with the .gha + the sibling files can open the project.
    *
-   * Only modifies blob: URLs; existing relative paths, file:// URLs, http(s)
+   * Only modifies local session URLs; existing relative paths, file:// URLs, http(s)
    * URLs, and data: URIs are left as-is.
    *
    * No-op + returns the input unchanged if not running in Electron.
@@ -2150,19 +2150,32 @@
     let data: any;
     try { data = JSON.parse(jsonStr); } catch { return jsonStr; }
 
-    // Collect every (parent, key) pointing at a blob: URL so we can mutate in place
-    const targets: { parent: any; key: string; src: string; nameHint: string }[] = [];
+    // Collect every (parent, key) pointing at a materializable local asset URL
+    // so we can mutate in place. `ghost-media:` URLs are session URLs backed
+    // by Electron's local-media protocol; save them as sibling files just like
+    // blob URLs so project files remain portable.
+    const targets: { parent: any; key: string; src: string; nameHint: string; clearLocalPath?: boolean }[] = [];
     function walk(node: any, parentName?: string) {
       if (!node) return;
       if (Array.isArray(node)) { node.forEach(n => walk(n, parentName)); return; }
       if (typeof node !== 'object') return;
       // .src field at any depth
-      if (typeof node.src === 'string' && node.src.startsWith('blob:')) {
+      const materializableSrc =
+        typeof node.src === 'string' &&
+        (node.src.startsWith('blob:') || (node.src.startsWith('ghost-media:') && typeof node.localPath === 'string'));
+      if (materializableSrc) {
         const hint =
+          (typeof node.localPath === 'string' && getFileNameFromPath(node.localPath)) ||
           (typeof node.name === 'string' && node.name) ||
           parentName ||
           'media';
-        targets.push({ parent: node, key: 'src', src: node.src, nameHint: hint });
+        targets.push({
+          parent: node,
+          key: 'src',
+          src: node.src,
+          nameHint: hint,
+          clearLocalPath: node.src.startsWith('ghost-media:'),
+        });
       }
       // Model3D layer's modelData also holds blob URLs
       if (typeof node.modelData === 'string' && node.modelData.startsWith('blob:')) {
@@ -2247,7 +2260,10 @@
     // Replace src/modelData fields with relative paths
     for (const t of targets) {
       const filename = writePlan.get(t.src);
-      if (filename) t.parent[t.key] = './' + filename;
+      if (filename) {
+        t.parent[t.key] = './' + filename;
+        if (t.clearLocalPath) delete t.parent.localPath;
+      }
     }
 
     console.log(`[Save] Materialized ${written}/${writePlan.size} blob assets to ${projectDir} (${failed} failed)`);
