@@ -1511,11 +1511,21 @@ void main() {
           disposeJSAnimationContext(oldSource.id);
         }
 
-        // Dispose old texture only when the underlying source genuinely changed
-        if (oldSource?.texture && srcChanged) {
-          console.log('Disposing old texture for:', oldSource.name);
-          oldSource.texture.dispose();
-        }
+        // DO NOT dispose `oldSource.texture` here.
+        //
+        // The texture object on `oldSource.texture` is the SAME reference
+        // held by Canvas.svelte's `textureCache` (assigned by
+        // updateTexturesSync from the URL-keyed cache). Disposing it here
+        // leaves the cache pointing at a dead texture, so when the user
+        // switches BACK to a previously-seen clip the cache hit returns a
+        // disposed VideoTexture and the new layer freezes on the last
+        // sampled frame.
+        //
+        // Texture lifetime is owned by Canvas.svelte's textureCache with
+        // LRU eviction (`evictTextureCache`). When the cache evicts an
+        // entry it disposes the texture properly. setLayerSource just
+        // changes which source the layer points at — the texture stays
+        // alive for fast switch-back until LRU reclaims it.
 
         return {
           ...project,

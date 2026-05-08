@@ -41,7 +41,13 @@
   const SIGNAL_CHANNEL = 'ghostarcade-output-pixels';
 
   const urlParams = new URLSearchParams(window.location.search);
-  const showStats = urlParams.get('stats') === '1';
+  // Full stats overlay starts on with `?stats=1` URL flag, OR can be
+  // toggled at runtime by pressing `S` on the output window. The minimal
+  // FPS-health badge below stays on regardless — it's small enough that
+  // it doesn't interfere with the visible projection but visible enough
+  // that the operator can spot a degraded link (low fps, dropped frames)
+  // on a projector vs. a healthy 60fps HDTV without opening DevTools.
+  let showStats = urlParams.get('stats') === '1';
 
   let videoEl: HTMLVideoElement;
   let pc: RTCPeerConnection | null = null;
@@ -49,6 +55,19 @@
   let connected = false;
   let statusText = 'Waiting for editor stream…';
   let disposed = false;
+
+  // Always-on minimal health badge. Visible when connected; hides when
+  // the projector/screen is showing a clean 60fps stream and shows in
+  // amber/red when fps drops below thresholds.
+  let healthFps = 0;             // smoothed presentation fps from rVFC
+  let healthDropped = 0;         // total dropped frames seen
+  let healthDisplay = '';        // "1280x720 @ 60Hz?" — best-effort
+  $: healthBadgeColor =
+       !connected ? '#444'
+     : healthFps >= 50 ? 'rgba(0, 0, 0, 0.0)'  /* invisible when healthy */
+     : healthFps >= 30 ? '#ffb300'              /* amber: degraded */
+     : '#ff3d00';                               /* red: bad */
+  $: healthBadgeShow = !connected || healthFps < 50;
 
   // ── Output transforms received over the signaling channel ──────────
   // The editor's outputPixelBroadcast pushes settings deltas as
@@ -234,11 +253,43 @@
       if (lastFrameAt > 0) {
         const dt = now - lastFrameAt;
         videoFps = videoFps === 0 ? 1000 / dt : videoFps * 0.95 + (1000 / dt) * 0.05;
+        // Mirror to the always-on health badge so it works even when the
+        // full stats overlay is off. rVFC fires on actual presented
+        // frames, which is what the operator cares about on a projector.
+        healthFps = videoFps;
       }
       lastFrameAt = now;
       (videoEl as any).requestVideoFrameCallback(onFrame);
     };
     (videoEl as any).requestVideoFrameCallback(onFrame);
+  }
+
+  // Always-on health stats poll. Lightweight (1s interval) — runs even
+  // when the full stats overlay is off so the FPS badge stays accurate.
+  let healthTimer: ReturnType<typeof setInterval> | null = null;
+  function startHealthLoop() {
+    if (healthTimer) clearInterval(healthTimer);
+    setupFrameCallback();
+    // Best-effort display info: viewport + screen dims + DPR. Chromium
+    // doesn't expose actual display refresh rate via DOM; rVFC fps is
+    // the closest proxy.
+    healthDisplay = `${window.innerWidth}×${window.innerHeight}` +
+                    `  screen ${screen.width}×${screen.height}` +
+                    `  dpr ${window.devicePixelRatio.toFixed(2)}`;
+    healthTimer = setInterval(async () => {
+      if (!pc || disposed) return;
+      try {
+        const stats = await pc.getStats();
+        stats.forEach((s: any) => {
+          if (s.type === 'inbound-rtp' && s.kind === 'video') {
+            healthDropped = s.framesDropped || 0;
+          }
+        });
+      } catch { /* getStats can throw transiently */ }
+    }, 1000);
+  }
+  function stopHealthLoop() {
+    if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
   }
 
   function startStatsLoop() {
@@ -282,6 +333,16 @@
     }, 1000);
   }
 
+  // Keyboard shortcut handler — `S` toggles the full stats overlay,
+  // `H` hides everything (status + stats + health). Available regardless
+  // of the `?stats=1` URL flag so a user troubleshooting an external
+  // display can flip diagnostics on without rebooting the output window.
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 's' || e.key === 'S') {
+      showStats = !showStats;
+    }
+  }
+
   onMount(async () => {
     // Remove the index.html splash overlay (same pattern the other
     // output apps use; otherwise the splash sits on top forever).
@@ -291,12 +352,22 @@
       setTimeout(() => splash.remove(), 600);
     }
 
+    window.addEventListener('keydown', handleKeydown);
+
+    // Always start the health loop — small badge + rVFC fps so the
+    // operator can spot a degraded link on the actual output device
+    // (projectors often run at 30/50Hz or have weird vsync; the rVFC
+    // fps tells you what's really being presented).
+    startHealthLoop();
+
     await setupSignaling();
   });
 
   onDestroy(() => {
     disposed = true;
+    window.removeEventListener('keydown', handleKeydown);
     stopReadyHeartbeat();
+    stopHealthLoop();
     if (statsTimer) {
       clearInterval(statsTimer);
       statsTimer = null;
@@ -330,8 +401,25 @@
   <div class="status-overlay">{statusText}</div>
 {/if}
 
-{#if showStats && connected && statsOverlay}
-  <pre class="stats-overlay">{statsOverlay}</pre>
+<!-- Always-on health badge. Small + corner-pinned + auto-hides when
+     the link is healthy (60fps, no drops). Visible in amber when fps
+     drops below 50, red below 30. Helps spot the difference between
+     a clean HDTV link and a struggling projector at a glance. -->
+{#if healthBadgeShow}
+  <div class="health-badge" style="background: {healthBadgeColor};">
+    {#if !connected}
+      ●  no link
+    {:else}
+      ●  {healthFps.toFixed(0)}fps {#if healthDropped > 0}· {healthDropped} dropped{/if}
+    {/if}
+    <span class="health-hint">press S for stats</span>
+  </div>
+{/if}
+
+{#if showStats && connected}
+  <pre class="stats-overlay">{statsOverlay || 'gathering stats…'}
+display {healthDisplay}
+press S to hide</pre>
 {/if}
 
 <style>
@@ -380,5 +468,30 @@
     pointer-events: none;
     margin: 0;
     white-space: pre;
+  }
+  /* Always-on health badge — small enough not to interfere with the
+     projection but readable at a glance from across the room. */
+  .health-badge {
+    position: fixed;
+    bottom: 12px;
+    right: 12px;
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 10px;
+    border-radius: 999px;
+    pointer-events: none;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    transition: background 0.4s;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .health-hint {
+    font-weight: 400;
+    font-size: 10px;
+    opacity: 0.7;
+    letter-spacing: 0.3px;
   }
 </style>
