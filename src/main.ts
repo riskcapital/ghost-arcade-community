@@ -11,6 +11,12 @@ silenceThreeSerializationNoise();
 initErrorReporter();
 
 // Determine which app to mount based on URL mode parameter.
+//   ?mode=webgpu-display -> WebGPU zero-copy receiver (experimental). The
+//                            editor renderer pumps GPU-backed VideoFrames
+//                            via a same-process MessageChannel; this app
+//                            does device.importExternalTexture + a
+//                            fullscreen quad. Opt-in via
+//                            settings.experimental.outputZeroCopy.
 //   ?mode=webrtc-display -> presentation-only WebRTC receiver (CURRENT DEFAULT
 //                            for the output window — the editor publishes its
 //                            canvas via same-process WebRTC and this window
@@ -22,7 +28,7 @@ initErrorReporter();
 //
 const urlParams = new URLSearchParams(window.location.search);
 const mode = urlParams.get('mode');
-const isOutputWindow = mode === 'output' || mode === 'webrtc-display';
+const isOutputWindow = mode === 'output' || mode === 'webrtc-display' || mode === 'webgpu-display';
 
 if (isOutputWindow && !(window as any).__OUTPUT_WINDOW_MODE__) {
   // contextBridge.exposeInMainWorld may have already set this read-only;
@@ -31,7 +37,10 @@ if (isOutputWindow && !(window as any).__OUTPUT_WINDOW_MODE__) {
 }
 
 async function init() {
-  if (mode === 'webrtc-display') {
+  if (mode === 'webgpu-display') {
+    const { default: OutputSharedTextureDisplayApp } = await import('./OutputSharedTextureDisplayApp.svelte');
+    mount(OutputSharedTextureDisplayApp, { target: document.getElementById('app')! });
+  } else if (mode === 'webrtc-display') {
     const { default: OutputDisplayApp } = await import('./OutputDisplayApp.svelte');
     mount(OutputDisplayApp, { target: document.getElementById('app')! });
   } else if (mode === 'output') {

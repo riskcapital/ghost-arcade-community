@@ -41,6 +41,17 @@
 
   // Texture sharing is Pro-only; imported legacy sources render as placeholders.
 
+  /**
+   * When true, this canvas is a SOURCE for the WebGPU bridge overlay
+   * (WebGPUCanvas.svelte) and should not be visible to the user. App.svelte
+   * mounts both Canvas (in bridgeMode=true) and WebGPUCanvas as overlay
+   * when settings.experimental.editorWebGPU is on. Hiding via opacity:0
+   * (rather than visibility:hidden / display:none) keeps Chromium painting
+   * the WebGL surface so VideoFrame wrapping has GPU-resident pixels to
+   * sample.
+   */
+  export let bridgeMode: boolean = false;
+
   let canvas: HTMLCanvasElement;
   let engine: RenderEngine | null = null;
   let animationId: number;
@@ -2928,6 +2939,15 @@
     return engine;
   }
 
+  /**
+   * Returns the underlying <canvas> DOM element. Used by App.svelte to
+   * push the source canvas into WebGPUCanvas's bridge presenter. Returns
+   * null until onMount has bound the ref.
+   */
+  export function getCanvas(): HTMLCanvasElement | null {
+    return canvas ?? null;
+  }
+
   // Expose actual container dimensions for warp handle alignment
   export function getContainerRect(): { x: number; y: number; width: number; height: number } {
     if (!containerEl || !wrapperEl) return { x: 0, y: 0, width: 0, height: 0 };
@@ -2951,7 +2971,7 @@
     class:output-mode={isOsrMode || isOutputMode}
     bind:this={containerEl}
   >
-    <canvas class="main-canvas" bind:this={canvas}></canvas>
+    <canvas class="main-canvas" class:bridge-source={bridgeMode} bind:this={canvas}></canvas>
     <!-- Edge blend + test pattern overlay over the final projected frame -->
     <canvas class="output-overlay" bind:this={outputOverlayCanvas}></canvas>
     {#if $settings.output.blackout}
@@ -3022,5 +3042,12 @@
     height: 100%;
     background: #000;
     z-index: 2;
+  }
+
+  /* When this Canvas is acting as the WebGL source for the WebGPU
+     bridge overlay, hide it visually but keep it laid out + painted
+     so VideoFrame wrapping has GPU-resident pixels to sample. */
+  .main-canvas.bridge-source {
+    opacity: 0;
   }
 </style>

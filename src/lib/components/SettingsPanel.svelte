@@ -520,6 +520,57 @@
               <span class="toggle-slider"></span>
             </label>
           </div>
+          {#if showOutputCursor}
+            <!-- Cursor sub-controls. Only meaningful for the WebGPU
+                 zero-copy output (legacy WebRTC output ignores style
+                 fields for now). All five fields drive the output
+                 receiver's CSS cursor overlay through the
+                 outputSharedTexturePresenter messagePort. -->
+            <div class="setting-row sub-row">
+              <span class="label-text">Style</span>
+              <select class="select-input"
+                value={$settings.output.outputCursorStyle ?? 'crosshair'}
+                onchange={(e) => settings.update(s => ({ ...s, output: { ...s.output, outputCursorStyle: (e.target as HTMLSelectElement).value as 'crosshair' | 'circle' | 'dot' | 'reticle' | 'fullscreen' } }))}
+              >
+                <option value="crosshair">Crosshair</option>
+                <option value="circle">Circle</option>
+                <option value="dot">Dot</option>
+                <option value="reticle">Reticle</option>
+                <option value="fullscreen">Fullscreen Lines</option>
+              </select>
+            </div>
+            <div class="setting-row sub-row">
+              <span class="label-text">Size</span>
+              <input type="range" min="4" max="128" step="1"
+                value={$settings.output.outputCursorSize ?? 28}
+                oninput={(e) => settings.update(s => ({ ...s, output: { ...s.output, outputCursorSize: parseInt((e.target as HTMLInputElement).value) } }))}
+              />
+              <span class="crop-value">{$settings.output.outputCursorSize ?? 28}px</span>
+            </div>
+            <div class="setting-row sub-row">
+              <span class="label-text">Thickness</span>
+              <input type="range" min="1" max="12" step="1"
+                value={$settings.output.outputCursorThickness ?? 2}
+                oninput={(e) => settings.update(s => ({ ...s, output: { ...s.output, outputCursorThickness: parseInt((e.target as HTMLInputElement).value) } }))}
+              />
+              <span class="crop-value">{$settings.output.outputCursorThickness ?? 2}px</span>
+            </div>
+            <div class="setting-row sub-row">
+              <span class="label-text">Color</span>
+              <input type="color"
+                value={$settings.output.outputCursorColor ?? '#ffffff'}
+                oninput={(e) => settings.update(s => ({ ...s, output: { ...s.output, outputCursorColor: (e.target as HTMLInputElement).value } }))}
+              />
+            </div>
+            <div class="setting-row sub-row">
+              <span class="label-text">Opacity</span>
+              <input type="range" min="0" max="1" step="0.01"
+                value={$settings.output.outputCursorOpacity ?? 0.85}
+                oninput={(e) => settings.update(s => ({ ...s, output: { ...s.output, outputCursorOpacity: parseFloat((e.target as HTMLInputElement).value) } }))}
+              />
+              <span class="crop-value">{(($settings.output.outputCursorOpacity ?? 0.85) * 100).toFixed(0)}%</span>
+            </div>
+          {/if}
         </section>
 
         <!-- Projection Tools section removed (v0.3.5):
@@ -1593,5 +1644,26 @@
   .update-cta-btn:hover {
     filter: brightness(1.1);
     transform: translateY(-1px);
+  }
+
+  /* Cursor sub-controls (only rendered when "Show Cursor on Output"
+     is on). Indented under their parent toggle row to make the
+     hierarchy visible. */
+  .sub-row {
+    padding-left: 16px;
+    border-left: 2px solid rgba(255, 255, 255, 0.05);
+    margin-left: 4px;
+    display: grid;
+    grid-template-columns: 88px 1fr auto;
+    align-items: center;
+    gap: 8px;
+  }
+  .select-input {
+    background: rgba(20, 20, 30, 0.6);
+    color: #ddd;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+    padding: 4px 6px;
+    font-size: 12px;
   }
 </style>

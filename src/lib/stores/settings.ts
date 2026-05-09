@@ -329,6 +329,15 @@ export interface OutputSettings {
   outputCropWidth: number;   // 0.1..1
   outputCropHeight: number;  // 0.1..1
   outputShowCursor: boolean; // crosshair overlay on output window
+  // Output cursor sub-controls (only meaningful when outputShowCursor=true).
+  // Driven by SettingsPanel; pushed to the WebGPU output's CSS-overlay
+  // cursor via outputSharedTexturePresenter.setOutputCursorStyle().
+  // The legacy WebRTC output ignores these for now.
+  outputCursorStyle: 'crosshair' | 'circle' | 'dot' | 'reticle' | 'fullscreen';
+  outputCursorSize: number;        // px (4..128)
+  outputCursorThickness: number;   // px (1..12)
+  outputCursorColor: string;       // CSS color
+  outputCursorOpacity: number;     // 0..1
   // Dome projection
   domeEnabled: boolean;
   domeMode: 'angular' | 'stereographic' | 'orthographic' | 'equirectangular';
@@ -351,12 +360,46 @@ export const DEFAULT_LAYER_SHADERS: { id: DefaultLayerShader; label: string }[] 
   { id: 'none', label: 'Blank (No Shader)' },
 ];
 
+/**
+ * Experimental / opt-in feature flags.
+ *
+ * Each flag controls a feature that's behind a compatibility flag until
+ * we're confident it works on the user's hardware. Defaults are chosen
+ * so the user sees zero behaviour change after upgrade — they have to
+ * explicitly turn each one on in Settings.
+ */
+export interface ExperimentalSettings {
+  /**
+   * Mounts WebGPUCanvas as an overlay on Canvas.svelte. Canvas keeps
+   * rendering its WebGL scene to a hidden source canvas; WebGPUCanvas
+   * wraps that canvas in a VideoFrame each tick and presents it via
+   * a WebGPU pipeline. Visually identical to WebGL-only; this is the
+   * first half of a migration path that will eventually let per-layer
+   * WebGPU renderers composite on top of the bridge surface.
+   * Default: false.
+   */
+  editorWebGPU: boolean;
+  /**
+   * Opens the output window via window.open() with `?mode=webgpu-display`
+   * and pumps GPU-backed VideoFrames through a same-process
+   * MessageChannel into a WebGPU receiver. True zero-copy; bypasses
+   * the WebRTC peer entirely. Requires editorWebGPU to be on for the
+   * editor canvas to itself be a WebGPU canvas captureStream'd by the
+   * presenter — so the user's full opt-in path is "turn on
+   * editorWebGPU, restart, then turn on outputZeroCopy, restart".
+   * Default: false in Community until a user has verified their
+   * hardware works (Chromium 130+ with GPU acceleration).
+   */
+  outputZeroCopy: boolean;
+}
+
 export interface AppSettings {
   recording: RecordingSettings;
   output: OutputSettings;
   ui: UISettings;
   ai: AISettings;
   defaultLayerShader: DefaultLayerShader;
+  experimental: ExperimentalSettings;
 }
 
 // Check which formats are supported by this browser
@@ -432,6 +475,11 @@ function createDefaultSettings(): AppSettings {
       outputCropWidth: 1,
       outputCropHeight: 1,
       outputShowCursor: false,
+      outputCursorStyle: 'crosshair',
+      outputCursorSize: 28,
+      outputCursorThickness: 2,
+      outputCursorColor: '#ffffff',
+      outputCursorOpacity: 0.85,
       // Dome projection defaults
       domeEnabled: false,
       domeMode: 'angular',
@@ -469,6 +517,15 @@ function createDefaultSettings(): AppSettings {
       replicateApiKey: '',
     },
     defaultLayerShader: 'grid',
+    experimental: {
+      // Off by default in Community. User has to opt in via Settings.
+      // editorWebGPU enables the WebGL→WebGPU bridge presenter.
+      // outputZeroCopy enables the WebGPU zero-copy output transport
+      // (requires editorWebGPU to be on for the editor canvas to be
+      // a WebGPU canvas the presenter can captureStream from).
+      editorWebGPU: false,
+      outputZeroCopy: false,
+    },
   };
 }
 
@@ -577,6 +634,10 @@ function loadSettings(): AppSettings {
           claudeApiKey: parsed.ai?.claudeApiKey || legacyClaude || '',
           geminiApiKey: parsed.ai?.geminiApiKey || legacyGemini || '',
           shaderProvider: parsed.ai?.shaderProvider || (legacyProvider as ShaderAIProvider) || defaults.ai.shaderProvider,
+        },
+        experimental: {
+          ...defaults.experimental,
+          ...(parsed.experimental || {}),
         },
       };
 

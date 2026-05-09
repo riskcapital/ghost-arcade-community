@@ -3,7 +3,7 @@
 // Works with shaders and videos directly (not compositions)
 
 import { writable, derived, get } from 'svelte/store';
-import type { BlendMode, Layer, MediaSource, Effect, JSAnimationSource, IntegratedEffectSource, SplatContent, Model3DContent, ISFInputDef } from '../types';
+import type { BlendMode, Layer, MediaSource, Effect, JSAnimationSource, IntegratedEffectSource, SplatContent, Model3DContent, ISFInputDef, ContentFitMode } from '../types';
 import { createDefaultSplatContent, createDefaultModel3DContent } from '../types';
 import { createThreeJSIframeContext, getThreeJSIframeContext, createJSAnimationContext } from '../renderer/engine';
 import { keyframeTimeline } from './keyframeTimeline';
@@ -65,6 +65,22 @@ export interface VJClip {
   model3dContent?: Model3DContent;
   // Per-clip effects
   effects?: Effect[];
+
+  // ── Per-clip video transforms (only meaningful when type === 'video').
+  //
+  // These describe how the source video is mapped onto its layer's
+  // unit quad. The transform is BAKED into the layer's `corners` field
+  // by vjOutputLayers (see below) — Layer.position/scale/rotation stay
+  // identity because the engine renders VJ layers via warp-quad
+  // corners, bypassing those transforms. Defaults match an unbaked
+  // identity quad: zoom=1, fit=cover, anchor=(0.5, 0.5), rotation=0,
+  // opacity=1.
+  zoom?: number;             // 0.1..4 (multiplier on quad size)
+  fit?: 'cover' | 'contain' | 'fill';
+  anchorX?: number;          // 0..1 (where in the canvas the quad's anchor sits)
+  anchorY?: number;          // 0..1
+  rotation?: number;         // -180..180 degrees
+  opacity?: number;          // 0..1 (multiplied into vjLayerOpacity)
 }
 
 // A block contains a named collection of clips (8 columns x 4 layers)
@@ -378,34 +394,70 @@ function createVJClipLauncherStore() {
     // Trigger a clip (activate it on its layer)
     triggerClip(layerIndex: number, columnIndex: number) {
       let didTrigger = false;
+      let isReclick = false;
+      let outgoingClip: VJClip | null = null;
+      let incomingClip: VJClip | null = null;
       const restartIds = new Set<string>();
       update(state => {
         const newLayerStates = [...state.layerStates];
         const clip = state.clipGrid[layerIndex][columnIndex];
         const currentActiveClip = newLayerStates[layerIndex].activeClip;
+        if (!clip) return state;
 
-        // If clicking the same clip that's already playing, keep it active (don't toggle off)
-        // Use the stop button on the layer to deactivate instead
-        if (currentActiveClip && clip && currentActiveClip.id === clip.id) {
-          // Just keep it active - no change needed
+        isReclick = !!(currentActiveClip && currentActiveClip.id === clip.id);
+        outgoingClip = !isReclick ? currentActiveClip : null;
+        incomingClip = clip;
+
+        // Re-clicking the currently-playing clip keeps STATE unchanged
+        // (so we don't reset keyframe time mid-show), but the video
+        // element below is still restarted to frame 0 — that's the
+        // explicit user expectation: every click on a clip starts it
+        // from the beginning, no exceptions.
+        if (isReclick) {
+          didTrigger = false;
           return state;
-        } else if (clip) {
-          if (currentActiveClip?.type === 'video') pauseClipVideo(currentActiveClip);
-          if (clip.type === 'video') {
-            prepareClipVideo(clip);
-            restartIds.add(clip.id);
-          }
-          // Trigger the clip - store it in activeClip for playback
-          newLayerStates[layerIndex] = {
-            ...newLayerStates[layerIndex],
-            activeColumn: columnIndex,
-            activeClip: clip
-          };
-          didTrigger = true;
         }
+
+        if (currentActiveClip?.type === 'video') pauseClipVideo(currentActiveClip);
+        if (clip.type === 'video') {
+          prepareClipVideo(clip);
+          restartIds.add(clip.id);
+        }
+        // Trigger the clip - store it in activeClip for playback
+        newLayerStates[layerIndex] = {
+          ...newLayerStates[layerIndex],
+          activeColumn: columnIndex,
+          activeClip: clip
+        };
+        didTrigger = true;
 
         return { ...state, layerStates: newLayerStates, stoppedAll: false };
       });
+
+      // VJ semantics: clicking a clip ALWAYS restarts it at frame 0,
+      // never resumes from where it last paused. Combined with pausing
+      // the outgoing clip on this same layer, this stops the
+      // "videos play forever in the background and resume mid-stream"
+      // behaviour. Wrapped in try/catch because currentTime= can throw
+      // if the element is mid-load. Cast through VJClip — TS can't
+      // track assignments across the update() closure boundary.
+      const inc = incomingClip as VJClip | null;
+      const out = outgoingClip as VJClip | null;
+      if (inc && inc.type === 'video' && inc.videoElement) {
+        try { inc.videoElement.currentTime = 0; } catch { /* */ }
+        if (inc.videoElement.paused) {
+          inc.videoElement.play().catch(() => { /* AbortError on rapid retrigger is fine */ });
+        }
+      }
+      // Pause the OUTGOING video so it doesn't keep decoding in the
+      // background. Only when it's a different element from the
+      // incoming clip's — same element (e.g. re-clicking same clip on
+      // the layer) doesn't get paused mid-restart.
+      if (out && out.type === 'video' && out.videoElement &&
+          out.videoElement !== inc?.videoElement) {
+        try { out.videoElement.pause(); } catch { /* */ }
+      }
+
       // Restart keyframe timeline from the beginning so clip animations play from t=0
       if (didTrigger) {
         syncVideoPlaybackForState(get({ subscribe }), restartIds);
@@ -665,6 +717,36 @@ function createVJClipLauncherStore() {
         newLayerStates[layerIndex] = { ...newLayerStates[layerIndex], activeClip: newClip };
 
         // Also update in the grid
+        const newGrid = state.clipGrid.map(row => [...row]);
+        for (let col = 0; col < state.numColumns; col++) {
+          const gridClip = newGrid[layerIndex]?.[col];
+          if (gridClip && gridClip.id === activeClip.id) {
+            newGrid[layerIndex][col] = newClip;
+          }
+        }
+
+        return { ...state, layerStates: newLayerStates, clipGrid: newGrid };
+      });
+    },
+
+    // Update video transform props on the active clip of a layer.
+    // Community v1.1.4 lacks playback fields (playbackMode/playbackRate/
+    // trimStart/trimEnd/isPlaying); the Pick<> here covers ONLY the
+    // transform fields the VJ Transform UI mutates. The transforms are
+    // baked into Layer.corners by vjOutputLayers — see below.
+    updateActiveClipVideoProps(layerIndex: number, updates: Partial<Pick<VJClip, 'zoom' | 'fit' | 'anchorX' | 'anchorY' | 'rotation' | 'opacity'>>) {
+      update(state => {
+        const newLayerStates = [...state.layerStates];
+        if (layerIndex < 0 || layerIndex >= newLayerStates.length) return state;
+        const activeClip = newLayerStates[layerIndex]?.activeClip;
+        if (!activeClip || activeClip.type !== 'video') return state;
+
+        const newClip = { ...activeClip, ...updates };
+        newLayerStates[layerIndex] = { ...newLayerStates[layerIndex], activeClip: newClip };
+
+        // Mirror the change into the grid for any cells whose clip.id
+        // matches (handles the case where the same source has been
+        // triggered into multiple columns of the same row).
         const newGrid = state.clipGrid.map(row => [...row]);
         for (let col = 0; col < state.numColumns; col++) {
           const gridClip = newGrid[layerIndex]?.[col];
@@ -1364,6 +1446,56 @@ export const vjOutputLayers = derived(
       if (clip.type === 'splat') layerType = 'splat';
       else if (clip.type === 'model3d') layerType = 'model3d';
 
+      // ── Per-clip video transforms baked into corners ──────────────
+      // VJ layers render via the engine's warp-quad pipeline, which
+      // bypasses Layer.position/scale/rotation in favour of the
+      // four-corner UV warp. So we synthesise non-identity corners
+      // from the per-clip transform and let the existing warp shader
+      // apply them. position/scale/rotation stay identity.
+      // contentFit + opacity are still consumed via the existing
+      // shader uniforms (they're UV-based and per-layer-multiply,
+      // not corner-based).
+      const clipZoom = clip.type === 'video' ? (clip.zoom ?? 1) : 1;
+      const clipRotation = clip.type === 'video' ? (clip.rotation ?? 0) : 0;
+      const clipOpacity = clip.type === 'video' ? (clip.opacity ?? 1) : 1;
+      const ax = clip.type === 'video' ? (clip.anchorX ?? 0.5) : 0.5;
+      const ay = clip.type === 'video' ? (clip.anchorY ?? 0.5) : 0.5;
+      // Map VJ-friendly fit names to engine ContentFitMode.
+      let clipContentFit: ContentFitMode | undefined;
+      if (clip.type === 'video') {
+        const f = clip.fit ?? 'cover';
+        clipContentFit = f === 'cover' ? 'fill' : f === 'contain' ? 'crop' : 'stretch';
+      }
+
+      // Corner computation. Engine corner space is [0,1]² with
+      // y=1 at top. We work in centered space (-0.5..0.5) for the
+      // matrix math, then re-translate to [0,1] for the engine.
+      const cosR = Math.cos((clipRotation * Math.PI) / 180);
+      const sinR = Math.sin((clipRotation * Math.PI) / 180);
+      // Anchor maps user 0..1 → quad offset from center in [-0.5..0.5].
+      const offX = (ax - 0.5);
+      const offY = (ay - 0.5);
+      const transformCorner = (cx: number, cy: number) => {
+        // cx,cy are corner positions in centered space ±0.5
+        // Apply zoom, rotate around center, translate by anchor
+        const sx = cx * clipZoom;
+        const sy = cy * clipZoom;
+        const rx = sx * cosR - sy * sinR;
+        const ry = sx * sinR + sy * cosR;
+        return { x: rx + 0.5 + offX, y: ry + 0.5 + offY };
+      };
+      // Default unit corners in centered space (-0.5..0.5). The
+      // top corners have cy=+0.5 because engine corner space has
+      // y=1 at the top, y=0 at the bottom — transformCorner adds
+      // 0.5 at the end so cy=+0.5 → y=1 (top) for identity. Hand-
+      // off into the engine's corner format is now direct.
+      const clipCorners = {
+        topLeft:     transformCorner(-0.5,  0.5),
+        topRight:    transformCorner( 0.5,  0.5),
+        bottomLeft:  transformCorner(-0.5, -0.5),
+        bottomRight: transformCorner( 0.5, -0.5),
+      };
+
       // Create Layer object with all required properties
       const layer: Layer = {
         id: `vj-layer-${vjLayerIndex}`,
@@ -1371,7 +1503,7 @@ export const vjOutputLayers = derived(
         type: layerType,
         visible: true,
         locked: false,
-        opacity: vjLayerOpacity,
+        opacity: vjLayerOpacity * clipOpacity,
         blendMode: activeLayer.blendMode,
         source,
         linesContent: null,
@@ -1381,20 +1513,21 @@ export const vjOutputLayers = derived(
         textContent: null,
         splatContent: clip.type === 'splat' ? (clip.splatContent || createDefaultSplatContent()) : null,
         model3dContent: clip.type === 'model3d' ? (clip.model3dContent || createDefaultModel3DContent()) : null,
-        // Transform
+        // Transform identity — per-clip transforms are baked into
+        // `corners` below so the engine's warp pipeline applies them
+        // uniformly. position/scale/rotation are bypassed by the
+        // corner pipeline anyway.
         position: { x: 0, y: 0 },
         scale: { x: 1, y: 1 },
         rotation: 0,
         flipH: false,
         flipV: false,
-        // Warping - full screen quad with default corners
+        contentFit: clipContentFit,
+        // Warping - corners computed from per-clip zoom/anchor/rotation
+        // above; defaults to a full-screen unit quad when all transforms
+        // are at identity (zoom=1, anchor=0.5/0.5, rotation=0).
         warpMode: 'corners',
-        corners: {
-          topLeft: { x: 0, y: 1 },
-          topRight: { x: 1, y: 1 },
-          bottomLeft: { x: 0, y: 0 },
-          bottomRight: { x: 1, y: 0 },
-        },
+        corners: clipCorners,
         meshGrid: null,
         // No mask or crop
         mask: null,

@@ -1881,6 +1881,7 @@
           (selectedLayerState?.activeClip?.type === 'shader' && selectedLayerState?.activeClip?.shaderCode && showShaderParams) ||
           (selectedLayerState?.activeClip?.type === 'splat') ||
           (selectedLayerState?.activeClip?.type === 'model3d') ||
+          (selectedLayerState?.activeClip?.type === 'video') ||
           (selectedLayerState?.activeClip?.type === 'effect' && selectedLayerState?.activeClip?.effectSource)
         ))}>
           <!-- Shader Parameters (above media tabs) -->
@@ -2140,6 +2141,80 @@
                 </div>
               </div>
             {/if}
+          {/if}
+
+          <!-- Video Transform (only when a video clip is selected). The
+               transforms are baked into the layer's `corners` field by
+               vjOutputLayers in vjClipLauncher; sliders here drive
+               updateActiveClipVideoProps which updates the active clip's
+               zoom/fit/anchor/rotation/opacity fields. -->
+          {#if selectedLayerIndex !== null && selectedLayerState?.activeClip?.type === 'video'}
+            {@const videoClip = selectedLayerState.activeClip}
+            <div class="shader-params-panel video-controls-panel">
+              <div class="shader-params-panel-header">
+                <span class="shader-params-overlay-title">
+                  {videoClip.name}
+                  <span class="shader-params-layer-badge">L{selectedLayerIndex + 1}</span>
+                </span>
+              </div>
+              <div class="shader-params-panel-list vt-transform">
+                <div class="vt-section-title">Transform</div>
+                <div class="vt-tf-row">
+                  <span class="vt-tf-label">Fit</span>
+                  <select class="vt-tf-select"
+                    value={videoClip.fit ?? 'cover'}
+                    onchange={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { fit: (e.target as HTMLSelectElement).value as 'cover' | 'contain' | 'fill' })}
+                  >
+                    <option value="cover">Cover</option>
+                    <option value="contain">Contain</option>
+                    <option value="fill">Fill</option>
+                  </select>
+                </div>
+                <div class="vt-tf-row">
+                  <span class="vt-tf-label">Zoom</span>
+                  <input type="range" min="0.1" max="4" step="0.01"
+                    value={videoClip.zoom ?? 1}
+                    oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { zoom: parseFloat((e.target as HTMLInputElement).value) })}
+                  />
+                  <span class="vt-tf-num">{(videoClip.zoom ?? 1).toFixed(2)}</span>
+                </div>
+                <div class="vt-tf-row">
+                  <span class="vt-tf-label">Anchor X</span>
+                  <input type="range" min="0" max="1" step="0.01"
+                    value={videoClip.anchorX ?? 0.5}
+                    oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { anchorX: parseFloat((e.target as HTMLInputElement).value) })}
+                  />
+                  <span class="vt-tf-num">{(videoClip.anchorX ?? 0.5).toFixed(2)}</span>
+                </div>
+                <div class="vt-tf-row">
+                  <span class="vt-tf-label">Anchor Y</span>
+                  <input type="range" min="0" max="1" step="0.01"
+                    value={videoClip.anchorY ?? 0.5}
+                    oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { anchorY: parseFloat((e.target as HTMLInputElement).value) })}
+                  />
+                  <span class="vt-tf-num">{(videoClip.anchorY ?? 0.5).toFixed(2)}</span>
+                </div>
+                <div class="vt-tf-row">
+                  <span class="vt-tf-label">Rotation</span>
+                  <input type="range" min="-180" max="180" step="1"
+                    value={videoClip.rotation ?? 0}
+                    oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { rotation: parseFloat((e.target as HTMLInputElement).value) })}
+                  />
+                  <span class="vt-tf-num">{(videoClip.rotation ?? 0).toFixed(0)}°</span>
+                </div>
+                <div class="vt-tf-row">
+                  <span class="vt-tf-label">Opacity</span>
+                  <input type="range" min="0" max="1" step="0.01"
+                    value={videoClip.opacity ?? 1}
+                    oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { opacity: parseFloat((e.target as HTMLInputElement).value) })}
+                  />
+                  <span class="vt-tf-num">{(videoClip.opacity ?? 1).toFixed(2)}</span>
+                </div>
+                <button class="vt-tf-reset"
+                  onclick={() => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { zoom: 1, fit: 'cover', anchorX: 0.5, anchorY: 0.5, rotation: 0, opacity: 1 })}
+                >Reset Transform</button>
+              </div>
+            </div>
           {/if}
       </div>
       </div>
@@ -5156,5 +5231,64 @@
     font-weight: bold;
     color: rgba(100,200,255,0.8);
     margin-right: 2px;
+  }
+
+  /* ── Per-clip video transform sub-panel ───────────────────────────
+     Lives inside .shader-params-panel.video-controls-panel; sliders
+     drive vjClipLauncher.updateActiveClipVideoProps which the
+     vjOutputLayers derived store reads to bake transforms into the
+     layer's `corners` field. */
+  .vt-transform {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 4px 0 6px;
+  }
+  .vt-section-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    opacity: 0.7;
+    margin-bottom: 2px;
+  }
+  .vt-tf-row {
+    display: grid;
+    grid-template-columns: 60px 1fr 44px;
+    align-items: center;
+    gap: 6px;
+  }
+  .vt-tf-label {
+    font-size: 11px;
+    opacity: 0.8;
+  }
+  .vt-tf-num {
+    font-size: 11px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.85;
+  }
+  .vt-tf-select {
+    grid-column: 2 / span 2;
+    background: rgba(20, 20, 30, 0.6);
+    color: #ddd;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+    padding: 2px 4px;
+    font-size: 11px;
+  }
+  .vt-tf-reset {
+    margin-top: 6px;
+    padding: 4px 8px;
+    background: rgba(40, 40, 50, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #ccc;
+    font-size: 11px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .vt-tf-reset:hover {
+    background: rgba(60, 60, 70, 0.8);
+    color: #fff;
   }
 </style>

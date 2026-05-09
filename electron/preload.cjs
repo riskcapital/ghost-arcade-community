@@ -30,6 +30,10 @@ const ALLOWED_IPC_COMMANDS = new Set([
   'get_displays', 'get_output_display_info', 'create_output_window', 'close_output_window',
   'output_fullscreen_external', 'output_toggle_fullscreen', 'output_set_cursor',
   'show_main_window',
+  // Pre-stages placement config for the next WebGPU zero-copy
+  // window.open('?mode=webgpu-display', ...) call. Editor renderer
+  // invokes this just before opening the output window.
+  'configure_next_output_window',
 
   // SRC tab Capture chooser — enumerates screens + app windows
   // with thumbnails so the renderer can show a Zoom/Slack-style picker.

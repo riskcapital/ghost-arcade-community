@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
   import Canvas from './lib/components/Canvas.svelte';
+  import WebGPUCanvas from './lib/components/WebGPUCanvas.svelte';
   import WarpHandles from './lib/components/WarpHandles.svelte';
   import MeshWarpHandles from './lib/components/MeshWarpHandles.svelte';
   import CustomShapeHandles from './lib/components/CustomShapeHandles.svelte';
@@ -81,6 +82,7 @@
   let outputWindow: OutputWindow;
   let outputIsOpen = false;
   let canvasComponent: Canvas;
+  let webgpuBridgeComponent: WebGPUCanvas | null = null;
 
   // GPU info state (populated after engine init)
   let gpuInfo: { renderer: string; vendor: string; isIntegrated: boolean } | null = null;
@@ -889,6 +891,35 @@
       });
       mo.observe(viewportEl, { childList: true, subtree: true });
     }
+
+    // WebGPU bridge wiring. When `experimental.editorWebGPU` is on,
+    // both Canvas (in bridgeMode=true) and WebGPUCanvas are mounted in
+    // the template. Canvas's getCanvas() returns null until ITS own
+    // onMount runs (Svelte mounts children before parent onMount fires
+    // so they're there, but the canvas ref binds inside the child's
+    // own onMount). Poll briefly until both refs and Canvas's <canvas>
+    // are ready, then push the source into WebGPUCanvas.setSourceCanvas
+    // exactly once.
+    let pushAttempts = 0;
+    const tryPushSource = () => {
+      if (!webgpuBridgeComponent) return; // Not in WebGPU mode.
+      const sourceCanvas = canvasComponent?.getCanvas?.() ?? null;
+      if (sourceCanvas) {
+        try {
+          webgpuBridgeComponent.setSourceCanvas(sourceCanvas);
+          return; // Done.
+        } catch (err) {
+          console.error('[App] setSourceCanvas threw:', err);
+        }
+      }
+      pushAttempts++;
+      if (pushAttempts < 60) {
+        setTimeout(tryPushSource, 100); // ~6s window before we give up.
+      } else {
+        console.warn('[App] WebGPU bridge: source canvas never appeared after 6s; bridge will stay idle.');
+      }
+    };
+    setTimeout(tryPushSource, 0);
 
     return () => {
       window.removeEventListener('lines-mode-change', handleLinesModeChange as EventListener);
@@ -3603,7 +3634,12 @@
           class="viewport-content"
           style="transform: translate({viewportPanX}px, {viewportPanY}px) scale({viewportZoom}); transform-origin: 0 0;"
         >
-        <Canvas bind:this={canvasComponent} />
+        {#if $settings.experimental?.editorWebGPU}
+          <Canvas bind:this={canvasComponent} bridgeMode={true} />
+          <WebGPUCanvas bind:this={webgpuBridgeComponent} />
+        {:else}
+          <Canvas bind:this={canvasComponent} />
+        {/if}
         <!-- Grid overlay: editor-only, not in output. Always visible when enabled. -->
         {#if $settings.ui.gridSettings?.enabled}
           <div class="grid-overlay-offset" style="left: {canvasOffsetX}px; top: {canvasOffsetY}px;">

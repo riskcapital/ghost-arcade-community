@@ -125,6 +125,12 @@ app.on('child-process-gone', (_ev, details) => {
 
 let mainWindow = null;
 let outputWindow = null;
+// Placement config staged by `configure_next_output_window` IPC and
+// consumed by the next setWindowOpenHandler call for the WebGPU
+// zero-copy output window. Cleared after consumption (or after a 5s
+// timeout to avoid cross-call leakage).
+let pendingOutputWindowConfig = null;
+let pendingOutputWindowConfigTimer = null;
 let sidecarProcess = null;
 const COMPANION_WS_PORT = '9001';
 const COMPANION_HTTP_PORT = '9002';
@@ -535,13 +541,40 @@ function registerIpcHandlers() {
       nativeHeight: nativeH,
     };
   });
-  ipcMain.handle('create_output_window', (_, args) => createOutputWindow(args));
+  // `experimentalZeroCopy` opts the next output window into the
+  // `webgpu-display` mode + same-process zero-copy MessageChannel
+  // path. Renderer reads settings.experimental.outputZeroCopy and
+  // passes it through. Selection precedence: zero-copy beats legacy.
+  ipcMain.handle('create_output_window', (_, args) => createOutputWindow(args || {}));
+
+  // Pre-stage placement config for the next WebGPU zero-copy output
+  // window opening. Called by the editor renderer immediately before
+  // `window.open('?mode=webgpu-display', ...)`. The setWindowOpenHandler
+  // (in createMainWindow) reads + clears this on the next matching open.
+  // Auto-clears after 5s if no open follows — prevents accidental
+  // staleness across user clicks.
+  ipcMain.handle('configure_next_output_window', (_, config) => {
+    pendingOutputWindowConfig = config && typeof config === 'object' ? { ...config } : null;
+    if (pendingOutputWindowConfigTimer) {
+      clearTimeout(pendingOutputWindowConfigTimer);
+      pendingOutputWindowConfigTimer = null;
+    }
+    if (pendingOutputWindowConfig) {
+      pendingOutputWindowConfigTimer = setTimeout(() => {
+        pendingOutputWindowConfig = null;
+        pendingOutputWindowConfigTimer = null;
+        console.log('[Output] pending config cleared (5s timeout)');
+      }, 5000);
+    }
+    return true;
+  });
+
   ipcMain.handle('close_output_window', () => {
     if (outputWindow && !outputWindow.isDestroyed()) outputWindow.close();
     outputWindow = null;
     return { ok: true };
   });
-  ipcMain.handle('output_fullscreen_external', () => {
+  ipcMain.handle('output_fullscreen_external', (_, args) => {
     // If no output window is open yet, CREATE one in fullscreen on the
     // first non-primary display (or the primary if no external display is
     // attached). Previously this returned silently when no window existed,
@@ -553,6 +586,7 @@ function registerIpcHandlers() {
       const all = screen.getAllDisplays();
       const target = all.find(d => d.id !== primary.id) || primary;
       const isExternal = target.id !== primary.id;
+      const experimentalZeroCopy = !!(args && args.experimentalZeroCopy);
       createOutputWindow({
         width: target.bounds.width,
         height: target.bounds.height,
@@ -560,6 +594,7 @@ function registerIpcHandlers() {
         y: target.bounds.y,
         fullscreen: true,
         displayId: target.id,
+        experimentalZeroCopy,
       });
       return { ok: true, displayId: target.id, isExternal, created: true };
     }
@@ -1167,10 +1202,79 @@ function createMainWindow() {
 
   // Window-open + navigation hardening
   // Any `window.open()` from the renderer (or hostile injection) goes
-  // through here. We DENY new BrowserWindow creation entirely (a new
-  // window would inherit our preload + IPC bridge) and instead route
-  // safe https:// URLs to the user's default browser via shell.openExternal.
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  // through here. The ONE exception is the WebGPU zero-copy output
+  // window: when the editor opens `?mode=webgpu-display` we let it
+  // through with carefully overridden BrowserWindow options because
+  // same-renderer-process MessageChannel is the only way to get true
+  // zero-copy VideoFrame transfer (cross-process MessageChannelMain
+  // silently drops GpuMemoryBuffer-backed frames in Chromium 130).
+  // Everything else is denied; safe https:// URLs are routed to the
+  // user's default browser via shell.openExternal.
+  //
+  // Editor-side flow (see OutputWindow.svelte / outputSharedTexture-
+  // Presenter.ts):
+  //   1. invoke('configure_next_output_window', { displayId, width,
+  //      height, fullscreen, x, y }) — pre-stages placement config
+  //      that this handler reads on the next matching open call
+  //   2. window.open(url, 'ga-output', '...') — synchronous; returns
+  //      the Window object proxy
+  //   3. await output's 'output-ready' message via window message
+  //   4. Create local MessageChannel; post port2 to the new window;
+  //      use port1 for the editor's pump
+  mainWindow.webContents.setWindowOpenHandler((details) => {
+    const { url } = details;
+    if (url && url.includes('mode=webgpu-display')) {
+      const cfg = pendingOutputWindowConfig || {};
+      pendingOutputWindowConfig = null;
+      if (pendingOutputWindowConfigTimer) {
+        clearTimeout(pendingOutputWindowConfigTimer);
+        pendingOutputWindowConfigTimer = null;
+      }
+      const allDisplays = screen.getAllDisplays();
+      let target = screen.getPrimaryDisplay();
+      if (cfg.displayId) {
+        const found = allDisplays.find(d => d.id === cfg.displayId);
+        if (found) target = found;
+      }
+      const bounds = target.bounds;
+      const fullscreen = !!cfg.fullscreen;
+      const winW = fullscreen ? bounds.width : Math.max(320, Math.min(8192, Math.round(cfg.width || 1280)));
+      const winH = fullscreen ? bounds.height : Math.max(240, Math.min(8192, Math.round(cfg.height || 720)));
+      const winX = fullscreen ? bounds.x : Math.round(cfg.x ?? bounds.x + (bounds.width - winW) / 2);
+      const winY = fullscreen ? bounds.y : Math.round(cfg.y ?? bounds.y + (bounds.height - winH) / 2);
+
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: winW,
+          height: winH,
+          x: winX,
+          y: winY,
+          title: 'Ghost Arcade Output',
+          resizable: true,
+          useContentSize: true,
+          frame: true,
+          fullscreen,
+          simpleFullscreen: process.platform === 'darwin',
+          autoHideMenuBar: true,
+          skipTaskbar: false,
+          backgroundColor: '#000000',
+          hasShadow: true,
+          webPreferences: {
+            preload: path.join(__dirname, 'preload.cjs'),
+            contextIsolation: true,
+            nodeIntegration: false,
+            webgl: true,
+            backgroundThrottling: false,
+            // Critical: the new window MUST share the main window's
+            // session/partition for window.open same-process semantics
+            // to apply. Electron's default behaviour does this, but
+            // setting it explicitly removes any future surprise.
+            session: mainWindow.webContents.session,
+          },
+        },
+      };
+    }
     try {
       const parsed = new URL(url);
       if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
@@ -1178,6 +1282,27 @@ function createMainWindow() {
       }
     } catch { /* malformed URL; silently drop */ }
     return { action: 'deny' };
+  });
+
+  // Capture the BrowserWindow created via window.open into the
+  // `outputWindow` global so existing placement IPCs continue to work
+  // against it. Also wire the close handler so we clear the global
+  // when the user closes the output window.
+  mainWindow.webContents.on('did-create-window', (newWindow, details) => {
+    if (!details.url || !details.url.includes('mode=webgpu-display')) return;
+    outputWindow = newWindow;
+    try { newWindow.setMenuBarVisibility(false); } catch { /* */ }
+    console.log('[Output] zero-copy output window captured into outputWindow global');
+    // DevTools opt-in via env var so smoothness benchmarks aren't
+    // distorted by devtools-induced GPU surface allocations. Set
+    // GHOSTARCADE_OUTPUT_DEVTOOLS=1 in the shell that runs the app
+    // to enable.
+    if (process.env.GHOSTARCADE_OUTPUT_DEVTOOLS === '1') {
+      try { newWindow.webContents.openDevTools({ mode: 'detach' }); } catch { /* */ }
+    }
+    newWindow.on('closed', () => {
+      if (outputWindow === newWindow) outputWindow = null;
+    });
   });
   // Block the renderer from navigating away from its origin entirely.
   // A stray window.location = "https://evil.com" would otherwise replace
@@ -1200,7 +1325,7 @@ function createMainWindow() {
 }
 
 function createOutputWindow(args = {}) {
-  const { width, height, x, y, fullscreen = false, displayId = null } = args;
+  const { width, height, x, y, fullscreen = false, displayId = null, experimentalZeroCopy = false } = args;
 
   // Dimension validation; clamp to sane bounds.
   const w = Math.max(320, Math.min(8192, Number(width) || 1920));
@@ -1255,22 +1380,52 @@ function createOutputWindow(args = {}) {
   });
   outputWindow.setMenuBarVisibility(false);
 
-  // WebRTC output transport (single-renderer pattern, like Resolume /
-  // TouchDesigner / VDMX): the output window mounts OutputDisplayApp,
-  // which receives the editor canvas as a same-process WebRTC stream and
-  // displays it via a single <video srcObject> element. This avoids the
-  // legacy second-renderer's `ghost-media://` cross-window contention
-  // that was producing freezes on external displays + projectors. The
-  // legacy `?mode=output` path is preserved in main.ts as a fallback so
-  // setting `GHOSTARCADE_OUTPUT_LEGACY=1` in the environment can flip
-  // back if a specific machine misbehaves.
+  // Output transport selection. Three modes, in precedence order:
+  //
+  //   webgpu-display → mounts OutputSharedTextureDisplayApp. Editor
+  //                    side runs MediaStreamTrackProcessor on
+  //                    canvas.captureStream(60), reads GPU-backed
+  //                    VideoFrames, and ships them via a same-process
+  //                    MessageChannel (the output window is opened via
+  //                    `window.open()` from the editor renderer when
+  //                    this mode is selected — see setWindowOpenHandler
+  //                    in createMainWindow). True zero-copy GPU
+  //                    pipeline. Opt-in via experimentalZeroCopy. NOTE:
+  //                    when this branch is selected here, the editor
+  //                    renderer normally takes the `window.open()` path
+  //                    and never invokes create_output_window. This
+  //                    fallback exists so the IPC path doesn't crash
+  //                    if the renderer ever sends the flag here.
+  //
+  //   webrtc-display → mounts OutputDisplayApp (same-process WebRTC
+  //                    peer). Default — preserves the v1.1.4 behaviour.
+  //
+  //   output         → legacy second-renderer fallback. Kept for safety;
+  //                    re-enable from GHOSTARCADE_OUTPUT_LEGACY=1 if
+  //                    WebRTC ever misbehaves on a specific machine.
   const useLegacyOutput = process.env.GHOSTARCADE_OUTPUT_LEGACY === '1';
-  const outputMode = useLegacyOutput ? 'output' : 'webrtc-display';
+  let outputMode;
+  if (experimentalZeroCopy) outputMode = 'webgpu-display';
+  else if (useLegacyOutput) outputMode = 'output';
+  else outputMode = 'webrtc-display';
+  console.log(`[Output] Selected mode "${outputMode}" (zeroCopy=${experimentalZeroCopy} legacy=${useLegacyOutput})`);
   const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:1420';
+  // The webgpu-disable URL flag is a belt-and-suspenders guard for
+  // legacy / WebRTC display modes where we don't want any WebGPU
+  // capability probe to trip. The new webgpu-display mode requires
+  // WebGPU so we omit the flag there.
+  const wantWebgpuDisable = outputMode !== 'webgpu-display';
   if (!app.isPackaged) {
-    outputWindow.loadURL(`${devUrl}?mode=${outputMode}`);
+    const queryParts = [`mode=${outputMode}`];
+    if (wantWebgpuDisable) queryParts.push('webgpu-disable=1');
+    outputWindow.loadURL(`${devUrl}?${queryParts.join('&')}`);
+    if (process.env.GHOSTARCADE_OUTPUT_DEVTOOLS === '1') {
+      try { outputWindow.webContents.openDevTools({ mode: 'detach' }); } catch { /* */ }
+    }
   } else {
-    outputWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query: { mode: outputMode } });
+    const fileQuery = { mode: outputMode };
+    if (wantWebgpuDisable) fileQuery['webgpu-disable'] = '1';
+    outputWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query: fileQuery });
   }
 
   // Same nav hardening as the main window; output should never load anything
