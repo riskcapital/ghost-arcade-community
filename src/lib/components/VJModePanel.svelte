@@ -1578,6 +1578,144 @@
 
   // Get selected layer effects
   $: selectedLayerState = selectedLayerIndex !== null ? $vjClipLauncher.layerStates[selectedLayerIndex] : null;
+
+  // ─── VJ Video Controls (full LayerPanel-mapping-mode parity) ──────────
+  // Mirrors LayerPanel.svelte's mapping-mode video controls. Refreshed
+  // by a requestAnimationFrame tick whenever the active clip is a video
+  // so the timeline + time readout stay live without forcing store
+  // updates 60×/sec.
+  let vjVideoCurrentTime = 0;
+  let vjVideoDuration = 0;
+  let vjTrimDragging: 'start' | 'end' | null = null;
+  let vjTimelineScrubbing = false;
+  let vjTimelineEl: HTMLDivElement | null = null;
+  let vjVideoTickFrame: number | null = null;
+
+  function vjFormatTime(seconds: number): string {
+    if (!isFinite(seconds) || isNaN(seconds)) return '0:00';
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  }
+
+  function startVjVideoTick() {
+    if (vjVideoTickFrame !== null) return;
+    function tick() {
+      const clip = selectedLayerState?.activeClip;
+      const v = clip?.videoElement;
+      if (clip?.type === 'video' && v) {
+        vjVideoCurrentTime = v.currentTime;
+        vjVideoDuration = v.duration || 0;
+      }
+      vjVideoTickFrame = requestAnimationFrame(tick);
+    }
+    tick();
+  }
+
+  function stopVjVideoTick() {
+    if (vjVideoTickFrame !== null) {
+      cancelAnimationFrame(vjVideoTickFrame);
+      vjVideoTickFrame = null;
+    }
+  }
+
+  $: {
+    const _activeClip = selectedLayerState?.activeClip;
+    if (_activeClip?.type === 'video' && _activeClip.videoElement) {
+      startVjVideoTick();
+    } else {
+      stopVjVideoTick();
+      vjVideoCurrentTime = 0;
+      vjVideoDuration = 0;
+    }
+  }
+
+  onDestroy(() => stopVjVideoTick());
+
+  function vjSeekToPosition(e: MouseEvent, vEl: HTMLVideoElement) {
+    if (!vjTimelineEl || !vEl) return;
+    const rect = vjTimelineEl.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / (rect.width || 1)));
+    // Clamp to active trim region — the per-frame loop pulls currentTime
+    // back to trimStart anyway, but clamping here avoids visual snap-back.
+    const clip = selectedLayerState?.activeClip;
+    const trimS = clip?.trimStart ?? 0;
+    const trimE = clip?.trimEnd ?? 1;
+    const clamped = Math.max(trimS, Math.min(trimE, pct));
+    try { vEl.currentTime = clamped * (vEl.duration || 0); } catch { /* mid-load */ }
+  }
+
+  function vjHandleTimelineMouseDown(e: MouseEvent, vEl: HTMLVideoElement) {
+    if (!vjTimelineEl || !vEl) return;
+    e.stopPropagation();
+    vjTimelineScrubbing = true;
+    vjSeekToPosition(e, vEl);
+    const onMove = (me: MouseEvent) => vjSeekToPosition(me, vEl);
+    const onUp = () => {
+      vjTimelineScrubbing = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  function vjHandleTrimMouseDown(e: MouseEvent, which: 'start' | 'end', layerIdx: number) {
+    e.stopPropagation();
+    e.preventDefault();
+    vjTrimDragging = which;
+    const onMove = (me: MouseEvent) => {
+      if (!vjTimelineEl) return;
+      const rect = vjTimelineEl.getBoundingClientRect();
+      const pct = Math.max(0, Math.min(1, (me.clientX - rect.left) / (rect.width || 1)));
+      const clip = $vjClipLauncher.layerStates[layerIdx]?.activeClip;
+      if (!clip) return;
+      const trimS = clip.trimStart ?? 0;
+      const trimE = clip.trimEnd ?? 1;
+      const updates: { trimStart?: number; trimEnd?: number } = {};
+      if (which === 'start') updates.trimStart = Math.min(pct, trimE - 0.02);
+      else updates.trimEnd = Math.max(pct, trimS + 0.02);
+      vjClipLauncher.updateActiveClipVideoProps(layerIdx, updates);
+    };
+    const onUp = () => {
+      vjTrimDragging = null;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  function vjSetVideoPlaying(layerIdx: number, playing: boolean) {
+    const clip = $vjClipLauncher.layerStates[layerIdx]?.activeClip;
+    const v = clip?.videoElement;
+    if (!clip || !v) return;
+    if (playing) v.play().catch(() => {}); else v.pause();
+    vjClipLauncher.updateActiveClipVideoProps(layerIdx, { isPlaying: playing });
+  }
+
+  function vjRestartVideo(layerIdx: number) {
+    const clip = $vjClipLauncher.layerStates[layerIdx]?.activeClip;
+    const v = clip?.videoElement;
+    if (!clip || !v) return;
+    try { v.currentTime = (clip.trimStart ?? 0) * (v.duration || 0); } catch {}
+    v.play().catch(() => {});
+    vjClipLauncher.updateActiveClipVideoProps(layerIdx, { isPlaying: true });
+  }
+
+  function vjSetPlaybackRate(layerIdx: number, rate: number) {
+    const clip = $vjClipLauncher.layerStates[layerIdx]?.activeClip;
+    const v = clip?.videoElement;
+    if (!clip) return;
+    if (v) v.playbackRate = rate;
+    vjClipLauncher.updateActiveClipVideoProps(layerIdx, { playbackRate: rate });
+  }
+
+  function vjSetPlaybackMode(layerIdx: number, mode: 'loop' | 'once') {
+    const clip = $vjClipLauncher.layerStates[layerIdx]?.activeClip;
+    if (!clip) return;
+    vjClipLauncher.updateActiveClipVideoProps(layerIdx, { playbackMode: mode });
+  }
 </script>
 
 <!-- VJ Mode Full Overlay -->
@@ -2148,71 +2286,165 @@
                vjOutputLayers in vjClipLauncher; sliders here drive
                updateActiveClipVideoProps which updates the active clip's
                zoom/fit/anchor/rotation/opacity fields. -->
-          {#if selectedLayerIndex !== null && selectedLayerState?.activeClip?.type === 'video'}
-            {@const videoClip = selectedLayerState.activeClip}
+          <!-- Video Controls Panel — matches LayerPanel mapping-mode controls.
+               Transport row (play/pause + restart + time + speed) → trim-aware
+               timeline → Loop/Once mode buttons → Transform sliders. -->
+          {#if selectedLayerIndex !== null && selectedLayerState?.activeClip?.type === 'video' && selectedLayerState?.activeClip?.videoElement}
+            {@const vClip = selectedLayerState.activeClip}
+            {@const vEl = vClip.videoElement!}
+            {@const vMode = vClip.playbackMode || 'loop'}
+            {@const vRate = vClip.playbackRate ?? 1.0}
+            {@const vTrimS = vClip.trimStart ?? 0}
+            {@const vTrimE = vClip.trimEnd ?? 1}
+            {@const vIsPlaying = vClip.isPlaying !== false}
             <div class="shader-params-panel video-controls-panel">
               <div class="shader-params-panel-header">
                 <span class="shader-params-overlay-title">
-                  {videoClip.name}
-                  <span class="shader-params-layer-badge">L{selectedLayerIndex + 1}</span>
+                  {vClip.name || 'Video'}
+                  <span class="shader-params-layer-badge" style="background: rgba(96, 165, 250, 0.3); color: #60a5fa;">VID</span>
                 </span>
               </div>
-              <div class="shader-params-panel-list vt-transform">
-                <div class="vt-section-title">Transform</div>
-                <div class="vt-tf-row">
-                  <span class="vt-tf-label">Fit</span>
-                  <select class="vt-tf-select"
-                    value={videoClip.fit ?? 'cover'}
-                    onchange={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { fit: (e.target as HTMLSelectElement).value as 'cover' | 'contain' | 'fill' })}
+              <div class="shader-params-panel-list">
+                <div class="vt-controls">
+                  <!-- Transport row -->
+                  <div class="vt-transport">
+                    <button
+                      class="vt-btn vt-play"
+                      onclick={() => vjSetVideoPlaying(selectedLayerIndex!, !vIsPlaying)}
+                      title={vIsPlaying ? 'Pause' : 'Play'}
+                    >
+                      {#if !vIsPlaying}
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+                      {:else}
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                      {/if}
+                    </button>
+                    <button class="vt-btn" onclick={() => vjRestartVideo(selectedLayerIndex!)} title="Restart">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+                      </svg>
+                    </button>
+                    <span class="vt-time">{vjFormatTime(vjVideoCurrentTime)} / {vjFormatTime(vjVideoDuration)}</span>
+                    <select
+                      class="vt-speed"
+                      value={String(vRate)}
+                      onchange={(e) => vjSetPlaybackRate(selectedLayerIndex!, parseFloat((e.target as HTMLSelectElement).value))}
+                    >
+                      <option value="0.25">0.25x</option>
+                      <option value="0.5">0.5x</option>
+                      <option value="1">1x</option>
+                      <option value="1.5">1.5x</option>
+                      <option value="2">2x</option>
+                      <option value="4">4x</option>
+                    </select>
+                  </div>
+
+                  <!-- Trim-aware timeline with playhead + drag handles -->
+                  <div
+                    class="vt-timeline"
+                    bind:this={vjTimelineEl}
+                    onmousedown={(e) => vjHandleTimelineMouseDown(e, vEl)}
+                    role="slider"
+                    tabindex="0"
+                    aria-label="Video timeline"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={vjVideoDuration > 0 ? Math.round(vjVideoCurrentTime / vjVideoDuration * 100) : 0}
                   >
-                    <option value="cover">Cover</option>
-                    <option value="contain">Contain</option>
-                    <option value="fill">Fill</option>
-                  </select>
+                    <div class="vt-trim-outside-left" style="width: {vTrimS * 100}%"></div>
+                    <div class="vt-trim-outside-right" style="width: {(1 - vTrimE) * 100}%"></div>
+                    <div class="vt-trim-region" style="left: {vTrimS * 100}%; width: {(vTrimE - vTrimS) * 100}%"></div>
+                    {#if vjVideoDuration > 0}
+                      <div class="vt-playhead" style="left: {(vjVideoCurrentTime / vjVideoDuration) * 100}%"></div>
+                    {/if}
+                    <div
+                      class="vt-trim-handle vt-trim-start"
+                      style="left: {vTrimS * 100}%"
+                      onmousedown={(e) => vjHandleTrimMouseDown(e, 'start', selectedLayerIndex!)}
+                      role="slider" tabindex="0" aria-label="Trim start"
+                    ></div>
+                    <div
+                      class="vt-trim-handle vt-trim-end"
+                      style="left: {vTrimE * 100}%"
+                      onmousedown={(e) => vjHandleTrimMouseDown(e, 'end', selectedLayerIndex!)}
+                      role="slider" tabindex="0" aria-label="Trim end"
+                    ></div>
+                  </div>
+
+                  <!-- Mode buttons -->
+                  <div class="vt-modes">
+                    <button class="vt-mode-btn" class:active={vMode === 'loop'} onclick={() => vjSetPlaybackMode(selectedLayerIndex!, 'loop')} title="Loop">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/>
+                        <polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+                      </svg>
+                      Loop
+                    </button>
+                    <button class="vt-mode-btn" class:active={vMode === 'once'} onclick={() => vjSetPlaybackMode(selectedLayerIndex!, 'once')} title="Play Once">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+                      Once
+                    </button>
+                  </div>
+
+                  <!-- Transform sliders -->
+                  <div class="vt-transform">
+                    <div class="vt-section-title">Transform</div>
+                    <div class="vt-tf-row">
+                      <span class="vt-tf-label">Fit</span>
+                      <select class="vt-tf-select"
+                        value={vClip.fit ?? 'cover'}
+                        onchange={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { fit: (e.target as HTMLSelectElement).value as any })}
+                      >
+                        <option value="cover">Cover (fill + crop)</option>
+                        <option value="contain">Contain (letterbox)</option>
+                        <option value="fill">Fill (stretch)</option>
+                      </select>
+                    </div>
+                    <div class="vt-tf-row">
+                      <span class="vt-tf-label">Zoom</span>
+                      <input type="range" min="0.1" max="4" step="0.05"
+                        value={vClip.zoom ?? 1}
+                        oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { zoom: +(e.target as HTMLInputElement).value })}
+                      />
+                      <span class="vt-tf-num">{(vClip.zoom ?? 1).toFixed(2)}×</span>
+                    </div>
+                    <div class="vt-tf-row">
+                      <span class="vt-tf-label">Anchor X</span>
+                      <input type="range" min="0" max="1" step="0.01"
+                        value={vClip.anchorX ?? 0.5}
+                        oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { anchorX: +(e.target as HTMLInputElement).value })}
+                      />
+                      <span class="vt-tf-num">{(vClip.anchorX ?? 0.5).toFixed(2)}</span>
+                    </div>
+                    <div class="vt-tf-row">
+                      <span class="vt-tf-label">Anchor Y</span>
+                      <input type="range" min="0" max="1" step="0.01"
+                        value={vClip.anchorY ?? 0.5}
+                        oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { anchorY: +(e.target as HTMLInputElement).value })}
+                      />
+                      <span class="vt-tf-num">{(vClip.anchorY ?? 0.5).toFixed(2)}</span>
+                    </div>
+                    <div class="vt-tf-row">
+                      <span class="vt-tf-label">Rotation</span>
+                      <input type="range" min="-180" max="180" step="1"
+                        value={vClip.rotation ?? 0}
+                        oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { rotation: +(e.target as HTMLInputElement).value })}
+                      />
+                      <span class="vt-tf-num">{(vClip.rotation ?? 0).toFixed(0)}°</span>
+                    </div>
+                    <div class="vt-tf-row">
+                      <span class="vt-tf-label">Opacity</span>
+                      <input type="range" min="0" max="1" step="0.01"
+                        value={vClip.opacity ?? 1}
+                        oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { opacity: +(e.target as HTMLInputElement).value })}
+                      />
+                      <span class="vt-tf-num">{Math.round((vClip.opacity ?? 1) * 100)}%</span>
+                    </div>
+                    <button class="vt-tf-reset"
+                      onclick={() => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { zoom: 1, fit: 'cover', anchorX: 0.5, anchorY: 0.5, rotation: 0, opacity: 1 })}
+                    >Reset Transform</button>
+                  </div>
                 </div>
-                <div class="vt-tf-row">
-                  <span class="vt-tf-label">Zoom</span>
-                  <input type="range" min="0.1" max="4" step="0.01"
-                    value={videoClip.zoom ?? 1}
-                    oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { zoom: parseFloat((e.target as HTMLInputElement).value) })}
-                  />
-                  <span class="vt-tf-num">{(videoClip.zoom ?? 1).toFixed(2)}</span>
-                </div>
-                <div class="vt-tf-row">
-                  <span class="vt-tf-label">Anchor X</span>
-                  <input type="range" min="0" max="1" step="0.01"
-                    value={videoClip.anchorX ?? 0.5}
-                    oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { anchorX: parseFloat((e.target as HTMLInputElement).value) })}
-                  />
-                  <span class="vt-tf-num">{(videoClip.anchorX ?? 0.5).toFixed(2)}</span>
-                </div>
-                <div class="vt-tf-row">
-                  <span class="vt-tf-label">Anchor Y</span>
-                  <input type="range" min="0" max="1" step="0.01"
-                    value={videoClip.anchorY ?? 0.5}
-                    oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { anchorY: parseFloat((e.target as HTMLInputElement).value) })}
-                  />
-                  <span class="vt-tf-num">{(videoClip.anchorY ?? 0.5).toFixed(2)}</span>
-                </div>
-                <div class="vt-tf-row">
-                  <span class="vt-tf-label">Rotation</span>
-                  <input type="range" min="-180" max="180" step="1"
-                    value={videoClip.rotation ?? 0}
-                    oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { rotation: parseFloat((e.target as HTMLInputElement).value) })}
-                  />
-                  <span class="vt-tf-num">{(videoClip.rotation ?? 0).toFixed(0)}°</span>
-                </div>
-                <div class="vt-tf-row">
-                  <span class="vt-tf-label">Opacity</span>
-                  <input type="range" min="0" max="1" step="0.01"
-                    value={videoClip.opacity ?? 1}
-                    oninput={(e) => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { opacity: parseFloat((e.target as HTMLInputElement).value) })}
-                  />
-                  <span class="vt-tf-num">{(videoClip.opacity ?? 1).toFixed(2)}</span>
-                </div>
-                <button class="vt-tf-reset"
-                  onclick={() => vjClipLauncher.updateActiveClipVideoProps(selectedLayerIndex!, { zoom: 1, fit: 'cover', anchorX: 0.5, anchorY: 0.5, rotation: 0, opacity: 1 })}
-                >Reset Transform</button>
               </div>
             </div>
           {/if}
@@ -5290,5 +5522,124 @@
   .vt-tf-reset:hover {
     background: rgba(60, 60, 70, 0.8);
     color: #fff;
+  }
+
+  /* ── VJ Video Controls Panel — full mapping-mode parity (transport row,
+     trim-aware timeline, Loop/Once mode buttons). Visuals match Pro/GPU. */
+  .video-controls-panel { padding: 8px; background: rgba(255, 255, 255, 0.04); border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.06); }
+  .vt-controls { display: flex; flex-direction: column; gap: 8px; }
+  .vt-transport { display: flex; align-items: center; gap: 4px; }
+  .vt-btn {
+    background: rgba(255, 255, 255, 0.08);
+    color: #ccc;
+    border: none;
+    width: 28px; height: 28px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s, color 0.15s;
+    flex-shrink: 0;
+  }
+  .vt-btn:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
+  .vt-play { background: #BB86FC; color: #111; }
+  .vt-play:hover { background: #CF6EFF; color: #000; }
+  .vt-time {
+    font-size: 11px;
+    color: #888;
+    font-family: monospace;
+    margin-left: 4px;
+    flex: 1;
+    white-space: nowrap;
+  }
+  .vt-speed {
+    background: rgba(255, 255, 255, 0.08);
+    color: #aaa;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+    font-size: 11px;
+    padding: 2px 4px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .vt-speed:hover { border-color: rgba(255, 255, 255, 0.25); }
+
+  .vt-timeline {
+    position: relative;
+    height: 24px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 3px;
+    cursor: pointer;
+    overflow: visible;
+    user-select: none;
+  }
+  .vt-trim-outside-left, .vt-trim-outside-right {
+    position: absolute; top: 0; height: 100%;
+    background: rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+    z-index: 1;
+  }
+  .vt-trim-outside-left { left: 0; border-radius: 3px 0 0 3px; }
+  .vt-trim-outside-right { right: 0; border-radius: 0 3px 3px 0; }
+  .vt-trim-region {
+    position: absolute; top: 0; height: 100%;
+    background: rgba(187, 134, 252, 0.15);
+    border-top: 2px solid rgba(187, 134, 252, 0.35);
+    border-bottom: 2px solid rgba(187, 134, 252, 0.35);
+    pointer-events: none;
+    z-index: 1;
+  }
+  .vt-playhead {
+    position: absolute; top: -2px;
+    width: 2px; height: calc(100% + 4px);
+    background: #BB86FC;
+    box-shadow: 0 0 4px rgba(187, 134, 252, 0.6);
+    z-index: 3;
+    pointer-events: none;
+    transform: translateX(-1px);
+  }
+  .vt-trim-handle {
+    position: absolute; top: 0;
+    width: 8px; height: 100%;
+    cursor: ew-resize;
+    z-index: 4;
+    transform: translateX(-4px);
+    border-radius: 2px;
+    transition: background 0.1s;
+  }
+  .vt-trim-handle::after {
+    content: ''; position: absolute;
+    top: 25%; left: 50%;
+    transform: translateX(-50%);
+    width: 2px; height: 50%;
+    background: rgba(187, 134, 252, 0.7);
+    border-radius: 1px;
+  }
+  .vt-trim-handle:hover { background: rgba(187, 134, 252, 0.25); }
+  .vt-trim-handle:hover::after { background: #BB86FC; }
+
+  .vt-modes { display: flex; gap: 2px; }
+  .vt-mode-btn {
+    flex: 1;
+    display: flex; align-items: center; justify-content: center;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: #888;
+    font-size: 10px;
+    padding: 4px 2px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .vt-mode-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #bbb;
+    border-color: rgba(255, 255, 255, 0.15);
+  }
+  .vt-mode-btn.active {
+    background: rgba(187, 134, 252, 0.2);
+    color: #BB86FC;
+    border-color: rgba(187, 134, 252, 0.4);
   }
 </style>

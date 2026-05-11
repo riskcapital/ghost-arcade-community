@@ -189,9 +189,12 @@
         const isVJVideoLayer =
           layer.source.type === 'video' &&
           typeof layer.id === 'string' && layer.id.startsWith('vj-layer-');
+        // Mirror the cache-key shape used by updateTexturesSync — VJ
+        // video layers key by clip.id (= source.id) so two cells holding
+        // the same source file get distinct cache entries.
         const textureCacheKey =
           (isAIGenerated || isSynthVision) ? layer.source.id
-          : isVJVideoLayer ? `${layer.id}:${layer.source.src}`
+          : isVJVideoLayer ? `${layer.id}:${layer.source.id}`
           : layer.source.src;
         const isShader = layer.source.type === 'shader';
         const lookupKey = isShader ? `${layer.id}:${textureCacheKey}` : textureCacheKey;
@@ -1178,13 +1181,24 @@
       // If we shared a URL-keyed cache between the two, VJ layers would
       // get back a texture wrapping mapping-mode's videoElement —
       // visible as a frozen frame from whatever the mapping clip last
-      // sampled. Namespacing by layer.id + src keeps them isolated.
+      // sampled.
+      //
+      // CRITICAL: namespace by layer.source.id (= clip.id) NOT
+      // layer.source.src. A common workflow is dragging the same video
+      // file into multiple cells of the same VJ layer — each cell gets
+      // its own clip.id and its own HTMLVideoElement, but they share a
+      // src. URL-keyed caching collided them all: clicking the second
+      // clip silently returned the cached VideoTexture wrapping the
+      // FIRST clip's videoElement, so the layer froze on whatever the
+      // first clip's element was decoding. Switching to id keys gives
+      // each clip its own cache entry; the cap's still small because
+      // VJ caches are reaped via the pinned-set walk in evictTextureCache.
       const isVJVideoLayer =
         layer.source.type === 'video' &&
         typeof layer.id === 'string' && layer.id.startsWith('vj-layer-');
       const textureCacheKey =
         (isAIGenerated || isSynthVision) ? layer.source.id
-        : isVJVideoLayer ? `${layer.id}:${layer.source.src}`
+        : isVJVideoLayer ? `${layer.id}:${layer.source.id}`
         : layer.source.src;
       // Layer-specific cache key for shader instances (which may have per-layer state)
       const shaderCacheKey = `${layer.id}:${textureCacheKey}`;
@@ -1469,57 +1483,47 @@
       if (source.type === 'image') {
         texture = await loadImageTexture(source.src);
       } else if (source.type === 'video') {
-        // Get video element - either from source or create a new one
+        // Get video element - either from source or create a new one.
+        //
+        // CRITICAL: when source.videoElement is already set (the VJ path
+        // — vjClipLauncher.prepareClipVideo creates the element + sets
+        // src at drop time), we must NOT recompute videoSrc via
+        // registerLocalMediaSource and we must NOT touch video.src.
+        // Doing either re-runs the resource selection algorithm on an
+        // element that already has a load in flight, which on Chromium
+        // 130 / Electron 42 aborts the load + any pending play() with
+        // AbortError. Pre-fix the first VJ video clip would load fine
+        // (it happened to win the race) but subsequent clip clicks
+        // would silently hang in `loadingTextures` forever, leaving the
+        // layer stuck on the first clip. The fix is to trust an
+        // already-set videoElement and only do the create/register
+        // dance for genuinely fresh elements (mapping mode first-load).
         let video = source.videoElement;
-        let videoSrc = source.src;
-        if (source.localPath || /^[a-zA-Z]:[\\/]/.test(source.src) || /^file:/i.test(source.src)) {
-          try {
-            videoSrc = await registerLocalMediaSource(source.localPath || source.src);
-          } catch (err) {
-            console.warn('[Canvas] Failed to register local video source, using original URL:', err);
-          }
-        }
 
-        // Track whether we created the element ourselves on this pass.
-        // Fresh elements need an explicit `.load()` kick — the src setter
-        // SHOULD auto-trigger the resource selection algorithm but in
-        // practice, for custom protocol URLs (`ghost-media://`) on
-        // Chromium 130 (Electron 42), the auto-trigger sometimes never
-        // fires loadeddata. A reused element (VJ rapid clip switch) has
-        // a load already in flight from `prepareClipVideo`, so calling
-        // `.load()` here would abort that one + any pending play() →
-        // AbortError. So: load() only on fresh creates, never on reused.
-        let isFreshElement = false;
-
-        // If no video element exists, create one
+        // If no video element exists, create one. Only this branch
+        // resolves localPath → ghost-media:// + sets src + calls .load()
+        // — the reused-element fast path below skips all of it.
         if (!video) {
+          let videoSrc = source.src;
+          if (source.localPath || /^[a-zA-Z]:[\\/]/.test(source.src) || /^file:/i.test(source.src)) {
+            try {
+              videoSrc = await registerLocalMediaSource(source.localPath || source.src);
+            } catch (err) {
+              console.warn('[Canvas] Failed to register local video source, using original URL:', err);
+            }
+          }
           video = document.createElement('video');
           if (shouldUseAnonymousCrossOrigin(videoSrc)) {
             video.crossOrigin = 'anonymous';
           }
-          video.src = videoSrc;
           video.loop = true;
           video.muted = true;
           video.playsInline = true;
           video.preload = 'auto';
-          isFreshElement = true;
-        } else if (source.localPath && video.getAttribute('src') !== videoSrc) {
-          video.pause();
-          if (shouldUseAnonymousCrossOrigin(videoSrc)) {
-            video.crossOrigin = 'anonymous';
-          } else {
-            video.removeAttribute('crossorigin');
-          }
-          // Setting `.src` re-runs the resource selection algorithm. We
-          // don't call `.load()` here too — a second in-flight load
-          // request, on Chromium 130+, races with any pending play() and
-          // throws AbortError. Pre-fix this caused VJ video clip
-          // switching to glitch out on rapid clicks.
           video.src = videoSrc;
-        }
 
-        if (video.readyState < 2) {
-          // Wait for video to be decoded enough to sample a frame.
+          // Wait for first frame. SAFE to call .load() here — fresh
+          // element, nothing to abort.
           await new Promise<void>((resolve, reject) => {
             const v = video!;
             const onLoaded = () => { cleanup(); resolve(); };
@@ -1530,16 +1534,11 @@
             };
             v.addEventListener('loadeddata', onLoaded, { once: true });
             v.addEventListener('error', onError, { once: true });
-            // Fresh elements: kick the load explicitly. Reused elements
-            // already have a load in flight — see big comment above.
-            if (isFreshElement) {
-              v.load();
-            }
+            v.load();
           });
-        }
 
-        if (!source.videoElement) {
-          // Store reference on the layer's source
+          // Store reference on the layer's source so future calls hit
+          // the reused-element fast path above.
           const currentLayers = $layers;
           const layer = currentLayers.find(l => l.id === layerId);
           if (layer?.source) {
@@ -1548,8 +1547,11 @@
           source.videoElement = video;
         }
 
-        // Wait for video to have actual frame data
-        if (video.readyState < 2) { // HAVE_CURRENT_DATA
+        // Wait for video to have actual frame data. For a reused
+        // element from prepareClipVideo this will usually be true
+        // already; if not, the rAF poll + oncanplay listener handle the
+        // gap without re-issuing a load.
+        if (video.readyState < 2) {
           await new Promise<void>((resolve) => {
             const checkReady = () => {
               if (video!.readyState >= 2) {

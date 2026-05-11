@@ -7,6 +7,50 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ---
 
+## [1.1.5] — 2026-05-11
+
+### Fixed
+
+- **VJ video clip switching no longer freezes after the first clip.**
+  Two bugs were colliding: (1) two cells holding the same source file
+  shared one texture-cache entry because the key was `${layer.id}:${src}`
+  instead of `${layer.id}:${clip.id}`; (2) `loadTextureAsync` re-resolved
+  `videoSrc` via `registerLocalMediaSource` and re-assigned `video.src`
+  on every load even when the element from `prepareClipVideo` was
+  already loading the same file. On Chromium 130 / Electron 42 the
+  re-assignment aborted the in-flight load and any pending `play()`,
+  leaving the second-and-onward clip stuck in `loadingTextures` forever.
+  Now: cache keys by clip id, and the reused-element fast path skips
+  the register/reassign dance entirely.
+
+- **VJ video trim region is now respected.** The per-frame trim-clamp
+  loop was reading `source.trimStart/trimEnd/playbackMode/playbackRate/
+  isPlaying`, but `vjOutputLayers` never stamped those fields onto the
+  `MediaSource` — so the loop always saw `trimEnd ?? 1` and let the
+  playhead run past the trim handles. Stamped at source-construction
+  time and re-stamped on every cache reuse so live drags propagate
+  immediately.
+
+### Added
+
+- **Full VJ video controls panel** — pause/restart, time readout, speed
+  selector, trim-aware timeline with playhead and drag handles, and
+  Loop / Once mode buttons. Mirrors the mapping-mode `LayerPanel` video
+  controls one-to-one. New `VJClip` fields: `playbackMode`,
+  `playbackRate`, `trimStart`, `trimEnd`, `isPlaying`. Widened
+  `updateActiveClipVideoProps` to accept them.
+
+- **Performer-mode video clip thumbnails.** Drop a video onto a key in
+  edit mode and the captured poster frame now shows on the cell, the
+  same way shader thumbnails do. Pre-fix the cell tried to use the
+  video URL as a CSS `background-image` and silently rendered nothing
+  because video can't be a CSS image. New `SVClipAssignment.mediaThumbnail`
+  field carries the poster through the drag → drop → label chain.
+  Legacy assignments (saved before this field existed) self-heal by
+  looking up the library item by `mediaId` on render.
+
+---
+
 ## [1.0.9] — 2026-05-06
 
 ### Changed
