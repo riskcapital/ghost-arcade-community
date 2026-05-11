@@ -393,6 +393,78 @@ export interface ExperimentalSettings {
   outputZeroCopy: boolean;
 }
 
+/**
+ * Performance settings — user-facing knobs to dial in the editor for
+ * weaker hardware. Defaults match the historical full-quality
+ * behaviour so capable machines see no change; users with integrated
+ * GPUs / older laptops can step these down via the Settings →
+ * Performance panel until the app feels smooth.
+ *
+ * All settings apply at runtime — no restart required — by reading
+ * the live store value at the relevant hot path (preview loop, output
+ * stream startup, etc.).
+ */
+export interface PerformanceSettings {
+  /**
+   * Maximum long-edge resolution of the VJ preview canvas in pixels.
+   * 0 = no cap (match main canvas resolution, default historical
+   * behaviour). Lower values trade preview crispness for GPU budget —
+   * the preview rendering does a per-frame drawImage from the WebGL
+   * canvas to a 2D context, which is one of the costliest ops on
+   * weak hardware. Recommended values: 1280 / 960 / 640 / 480.
+   */
+  previewMaxDim: number;
+  /**
+   * Target refresh rate for the VJ preview loop. The preview is just
+   * a monitor — 30 or even 15 fps is plenty for the user to see
+   * what's going out. 60fps is the default for buttery interaction
+   * on capable machines. Independent of the output stream framerate.
+   */
+  previewFrameRate: 60 | 30 | 15;
+  /**
+   * WebRTC output stream framerate. The output window's encoder runs
+   * at this rate; lower = less GPU encode work. 60 = silky smooth for
+   * fast-motion content; 30 = standard projector / second-display
+   * cadence; 24 = cinematic and lightest on the encoder.
+   */
+  outputFrameRate: 60 | 30 | 24;
+  /**
+   * Max bitrate for the WebRTC output encoder, in bits per second.
+   * Same-process loopback so the bitrate doesn't go on a wire — high
+   * values just give the encoder more headroom to run at near-lossless
+   * quality. Lower values reduce encoder CPU/GPU cost proportionally.
+   */
+  outputMaxBitrate: number;
+  /**
+   * How the encoder degrades under load:
+   *  - 'maintain-resolution': drop framerate first (default — keep
+   *     pixel fidelity).
+   *  - 'maintain-framerate': drop resolution first (better for fast
+   *     motion / projection where smoothness matters more than crispness).
+   *  - 'balanced': WebRTC default; encoder picks.
+   */
+  outputDegradationPreference: 'maintain-resolution' | 'maintain-framerate' | 'balanced';
+  /**
+   * Preferred WebRTC video codec.
+   *  - 'auto': VP9 → AV1 → H.264 → VP8 (sweet spot for same-process).
+   *  - 'h264': force H.264 first — best for users with HW H.264
+   *     encoders (modern Win/Mac/Linux). Massive perf bump if the
+   *     auto path ended up software-encoded.
+   *  - 'vp8': force VP8 first — maximum compatibility fallback.
+   */
+  outputCodecPreference: 'auto' | 'h264' | 'vp8';
+  /**
+   * Maximum frame rate for the editor's render loop. 0 = uncapped
+   * (default — runs at the display's refresh rate). Cap to match
+   * your projector's refresh (typically 60) to stop the editor
+   * burning GPU cycles on frames the projector can't show. Especially
+   * important on high-refresh monitors (120/144/165Hz) where uncapped
+   * means 2-3× the render work for no visible benefit. Input handlers
+   * stay responsive regardless of the cap.
+   */
+  editorMaxFps: 0 | 30 | 60;
+}
+
 export interface AppSettings {
   recording: RecordingSettings;
   output: OutputSettings;
@@ -400,6 +472,7 @@ export interface AppSettings {
   ai: AISettings;
   defaultLayerShader: DefaultLayerShader;
   experimental: ExperimentalSettings;
+  performance: PerformanceSettings;
 }
 
 // Check which formats are supported by this browser
@@ -526,6 +599,17 @@ function createDefaultSettings(): AppSettings {
       editorWebGPU: false,
       outputZeroCopy: false,
     },
+    performance: {
+      // Defaults match the historical full-quality behaviour. Users on
+      // weak hardware step these down via Settings → Performance.
+      previewMaxDim: 0,               // 0 = no cap (match main canvas)
+      previewFrameRate: 60,
+      outputFrameRate: 60,
+      outputMaxBitrate: 80_000_000,   // 80 Mbps
+      outputDegradationPreference: 'maintain-resolution',
+      outputCodecPreference: 'auto',
+      editorMaxFps: 0,                // 0 = uncapped (match rAF / refresh rate)
+    },
   };
 }
 
@@ -638,6 +722,10 @@ function loadSettings(): AppSettings {
         experimental: {
           ...defaults.experimental,
           ...(parsed.experimental || {}),
+        },
+        performance: {
+          ...defaults.performance,
+          ...(parsed.performance || {}),
         },
       };
 

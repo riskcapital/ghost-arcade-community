@@ -69,7 +69,18 @@ let pc: RTCPeerConnection | null = null;
 let stream: MediaStream | null = null;
 let channel: BroadcastChannel | null = null;
 let sourceCanvas: HTMLCanvasElement | null = null;
+// Capture rate. Defaults to 60fps for capable hardware; lowered by the
+// Settings → Performance panel via startOutputPixelBroadcast's
+// frameRate arg when users opt into a lower-cost output stream.
 let captureFrameRate = 60;
+// Perf-tuning knobs forwarded from startOutputPixelBroadcast to the
+// peer-build path (handleReadyFromOutput), which is the function that
+// actually configures the RTC encoder. Module-level so we don't have
+// to thread them through the BroadcastChannel ready-handshake; set
+// once at start, consumed when the output window connects.
+let captureMaxBitrate = 80_000_000;
+let captureDegradationPref: 'maintain-resolution' | 'maintain-framerate' | 'balanced' = 'maintain-resolution';
+let captureCodecPref: 'auto' | 'h264' | 'vp8' = 'auto';
 
 // ICE candidate queue — same rationale as on the receiver side.
 // addIceCandidate throws if called before setRemoteDescription
@@ -87,12 +98,23 @@ let settingsUnsub: (() => void) | null = null;
 /** Set up the broadcaster. Idempotent — calling multiple times with
  *  the same canvas is a no-op; calling with a different canvas tears
  *  down the previous peer first. */
-export function startOutputPixelBroadcast(canvas: HTMLCanvasElement, frameRate = 60): void {
+export function startOutputPixelBroadcast(
+  canvas: HTMLCanvasElement,
+  frameRate = 60,
+  perfOptions?: {
+    maxBitrate?: number;
+    degradationPreference?: 'maintain-resolution' | 'maintain-framerate' | 'balanced';
+    codecPreference?: 'auto' | 'h264' | 'vp8';
+  },
+): void {
   if (sourceCanvas === canvas && channel) return;
   if (sourceCanvas !== canvas) stopOutputPixelBroadcast();
 
   sourceCanvas = canvas;
   captureFrameRate = frameRate;
+  if (perfOptions?.maxBitrate !== undefined) captureMaxBitrate = perfOptions.maxBitrate;
+  if (perfOptions?.degradationPreference !== undefined) captureDegradationPref = perfOptions.degradationPreference;
+  if (perfOptions?.codecPreference !== undefined) captureCodecPref = perfOptions.codecPreference;
 
   try {
     channel = new BroadcastChannel(SIGNAL_CHANNEL);
@@ -260,19 +282,21 @@ async function handleReadyFromOutput(): Promise<void> {
   }
 
   // Tune the sender for our specific workload: same-process loopback,
-  // local network, no bandwidth concerns, want max visual quality.
-  // Default WebRTC settings target a generic videoconference and scale
-  // down under load — that's what was making the WebRTC output look
-  // noticeably worse than the legacy renderer at smaller window sizes.
+  // local network, no bandwidth concerns, want max visual quality on
+  // capable hardware. Users with weak GPUs can dial these down via the
+  // Settings → Performance panel — see `perfOptions` arg.
   //
+  // Defaults (capable hardware):
   //   - maxBitrate 80 Mbps: well above what any practical content
   //     needs, lets the encoder run close to lossless. Same-process
   //     transit so the bitrate doesn't go on a wire.
   //   - degradationPreference 'maintain-resolution': if the encoder
-  //     can't keep up, drop fps before scale, never the other way.
+  //     can't keep up, drop fps before scale.
   //   - scaleResolutionDownBy 1.0: hard floor, no auto-scaling.
   //   - networkPriority 'high': ask the OS scheduler to prioritise
   //     the loopback datapath.
+  const maxBitrate = captureMaxBitrate;
+  const degradationPreference = captureDegradationPref;
   for (const sender of senders) {
     try {
       const params = sender.getParameters();
@@ -280,36 +304,45 @@ async function handleReadyFromOutput(): Promise<void> {
         params.encodings = [{}];
       }
       for (const enc of params.encodings) {
-        enc.maxBitrate = 80_000_000;
+        enc.maxBitrate = maxBitrate;
         enc.scaleResolutionDownBy = 1.0;
         (enc as any).networkPriority = 'high';
       }
       // 'degradationPreference' is a sender-level field, not per-encoding.
-      (params as any).degradationPreference = 'maintain-resolution';
+      (params as any).degradationPreference = degradationPreference;
       await sender.setParameters(params);
     } catch (e: any) {
       console.warn('[OutputPixelBroadcast] sender.setParameters failed (proceeding with defaults):', e?.message ?? e);
     }
   }
 
-  // SDP offer/answer exchange. After SDP is negotiated, optionally
-  // swap codec preferences to VP9 / AV1 (higher quality at same
-  // bitrate than VP8). Done before createOffer so the offer carries
-  // the preference.
+  // Codec preference — applied to all video transceivers BEFORE
+  // createOffer so the SDP carries the preference. Three modes:
+  //
+  //   'auto' (default): VP9 → AV1 → H.264 → VP8 priority. VP9 is the
+  //     same-process sweet spot — better quality-per-bitrate than VP8,
+  //     widely hardware-decoded, cheap to encode. AV1 is best in
+  //     theory but encode cost is high on most CPUs.
+  //   'h264': force H.264 first. Best for users with hardware H.264
+  //     encoders (modern Win/Mac/Linux with discrete or recent
+  //     integrated GPU). Big perf win when HW path is available.
+  //   'vp8': force VP8 first. Maximum compatibility — works on every
+  //     WebRTC implementation. Use as a fallback when 'auto' picks a
+  //     codec that ends up software-encoded on the user's machine.
   try {
-    const transceivers = pc.getTransceivers();
     const supported = (RTCRtpSender as any).getCapabilities?.('video')?.codecs ?? [];
     if (supported.length) {
-      // Preferred order: VP9 > AV1 > H.264 > VP8. AV1 has the best
-      // quality/bitrate ratio but encode cost is higher; VP9 is the
-      // sweet spot for same-process where bitrate is free anyway.
-      const order = ['video/VP9', 'video/AV1', 'video/H264', 'video/VP8'];
+      const codecPref = captureCodecPref;
+      let order: string[];
+      if (codecPref === 'h264')      order = ['video/H264', 'video/VP9', 'video/VP8', 'video/AV1'];
+      else if (codecPref === 'vp8')  order = ['video/VP8', 'video/VP9', 'video/H264', 'video/AV1'];
+      else                            order = ['video/VP9', 'video/AV1', 'video/H264', 'video/VP8'];
       const preferred = order
         .map((mt) => supported.find((c: any) => c.mimeType === mt))
         .filter(Boolean);
       const rest = supported.filter((c: any) => !preferred.includes(c));
       const codecOrder = [...preferred, ...rest];
-      for (const t of transceivers) {
+      for (const t of pc.getTransceivers()) {
         if (t.sender && t.sender.track && t.sender.track.kind === 'video') {
           try { (t as any).setCodecPreferences(codecOrder); } catch { /* spec-optional */ }
         }

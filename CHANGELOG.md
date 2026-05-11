@@ -7,6 +7,71 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ---
 
+## [1.1.6] — 2026-05-11
+
+### Added
+
+- **Settings → Performance tab.** A dedicated panel for users on
+  weaker hardware to dial in the editor until it feels smooth.
+  Defaults match the historical full-quality behaviour so capable
+  machines see no change. All settings apply live (no restart).
+  - **Render Quality**: Shader Quality (moved here from Output).
+  - **Editor Render**: Frame rate cap (Uncapped / 60 / 30 fps).
+    Caps the main render loop — big win on high-refresh monitors
+    (120/144/165 Hz) where the projector is 60 Hz and the extra
+    frames are wasted.
+  - **VJ Preview**: Resolution cap (Full / 1280 / 960 / 640 / 480 px
+    long-edge) + Refresh rate (60 / 30 / 15 fps). Only affects the VJ
+    mode preview pane, not the output.
+  - **Output Stream**: Frame rate (60 / 30 / 24 fps), Max bitrate
+    (80 / 40 / 20 / 10 Mbps), Quality vs Smoothness (maintain
+    resolution / framerate / balanced), Video codec (Auto / Force
+    H.264 / Force VP8). Codec selection routes through
+    `RTCRtpTransceiver.setCodecPreferences`. Forcing H.264 on
+    machines with hardware H.264 encoders gives a large perf bump.
+  - **Video Decoding readout**: live `MediaCapabilities` probe shows
+    whether H.264 / HEVC / VP9 / AV1 decode on this machine in
+    hardware, software, or not at all. Links to ffmpeg recipes on
+    the website.
+  - **Help link** to https://ghostarcade.live/docs/performance for a
+    full guide on optimizing for your hardware.
+
+- **Integrated-GPU warning banner.** On startup, queries the WebGL
+  renderer string. If it matches an integrated / software pattern
+  (Intel HD/UHD/Iris, Microsoft Basic Render, llvmpipe), surfaces a
+  yellow banner at the top of the editor with three actions:
+  *Tune Performance* (opens Settings → Performance), *Dismiss* (this
+  session), *Don't show again* (persistent). Most "app is laggy"
+  reports trace back to laptops running on the wrong GPU — this gets
+  users straight to a fix instead of leaving them blaming the app.
+
+### Fixed
+
+- **Resize guard on the engine.** `Canvas.svelte`'s reactive
+  `$project` block was calling `engine.resize` + reallocating every
+  shader/SVG render target on every project store update — layer
+  adds, name edits, slider tweaks, the lot. Now bails when project
+  dimensions are unchanged. Eliminates spurious RT reallocations
+  during normal interaction; especially noticeable on weak GPUs.
+
+- **`preserveDrawingBuffer: false`** on the editor canvas. Was `true`
+  to support one-shot thumbnail captures, but the cost was paid on
+  every paint for the rest of the session. Removed unconditionally;
+  any thumbnail capture path that needed it can do an explicit
+  one-shot render to a dedicated render target.
+
+### Changed
+
+- **Floating output-window status badge** no longer permanently
+  displays the FPS readout when output is configured to run below
+  50fps. Pre-fix the badge fired on `fps < 50` as a "degraded link"
+  signal, but users with the new Output Stream framerate set to 30
+  or 24 fps saw it constantly. Badge now only surfaces on genuine
+  fault states: no-link (WebRTC) or CPU fallback (WebGPU zero-copy).
+  Press-S stats overlay still works for users who want the numbers.
+
+---
+
 ## [1.1.5] — 2026-05-11
 
 ### Fixed

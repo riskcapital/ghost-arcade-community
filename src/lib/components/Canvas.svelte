@@ -421,7 +421,15 @@
     const { w: wrapW, h: wrapH } = getWrapperLayoutSize();
     const projW = $project.width || 1920;
     const projH = $project.height || 1080;
-    engine = new RenderEngine(canvas, projW, projH, { preserveDrawingBuffer: !isOutputMode });
+    // preserveDrawingBuffer was true for the editor (only off in output
+    // window mode) so a one-shot canvas.toBlob/toDataURL for thumbnails
+    // could read back the last frame. But it costs continuous-render
+    // perf on every GPU because the browser has to keep the framebuffer
+    // intact between paints (no eager clear, extra blits on some
+    // drivers). Switched to false unconditionally — any thumbnail
+    // capture path that needed it can do a single explicit render to a
+    // separate WebGLRenderTarget when it needs to grab a frame.
+    engine = new RenderEngine(canvas, projW, projH, { preserveDrawingBuffer: false });
     // Set initial container size from wrapper layout dimensions
     sizeContainer(wrapW, wrapH);
 
@@ -474,7 +482,15 @@
     // Editor-only: the output window itself shouldn't broadcast to
     // itself.
     if (!isOsrMode && !isOutputMode && canvas) {
-      startOutputPixelBroadcast(canvas, 60);
+      // Read perf knobs from Settings → Performance so users on weak
+      // hardware can dial down framerate / bitrate / codec without
+      // editing code. Defaults match the historical full-quality path.
+      const _perf = get(settings)?.performance;
+      startOutputPixelBroadcast(canvas, _perf?.outputFrameRate ?? 60, {
+        maxBitrate: _perf?.outputMaxBitrate,
+        degradationPreference: _perf?.outputDegradationPreference,
+        codecPreference: _perf?.outputCodecPreference,
+      });
     }
 
     // Expose canvas to window for VJ preview
@@ -541,6 +557,13 @@
     // the rest of the session with no indication to the user. With the guard,
     // bad frames are logged and skipped, next frame still schedules.
     let _consecutiveFrameErrors = 0;
+    // Editor render-rate cap. rAF on a high-refresh display runs at
+    // 120/144/165Hz — the editor renders at that rate, but the projector
+    // is almost always 60Hz so anything above 60 is wasted work. Users
+    // dial this from Settings → Performance: 0 = uncapped (default for
+    // capable hardware), or 60 / 30 to cap. Skips the render path on
+    // throttled frames but always reschedules rAF for input responsiveness.
+    let _lastEditorRenderTime = 0;
     function animate() {
       // Lightweight first-frame diagnostic for startup failures.
       if (!(window as any).__animTick) (window as any).__animTick = 0;
@@ -550,6 +573,21 @@
           'engine=', !!engine, 'contextLost=', contextLost, 'outputFrozen=', $outputFrozen,
           'outputWindowOpen=', $settings?.output?.outputWindowOpen, 'glCanvas=', !!glCanvas);
       }
+
+      // Render-rate gate. Reschedule rAF unconditionally so input
+      // handlers (mousedown/mouseup/keydown) stay responsive; just
+      // bypass the render body when the cap says we're early.
+      const _editorFpsCap = ($settings as any)?.performance?.editorMaxFps ?? 0;
+      if (_editorFpsCap > 0) {
+        const now = performance.now();
+        const interval = 1000 / _editorFpsCap;
+        if (now - _lastEditorRenderTime < interval) {
+          animationId = requestAnimationFrame(animate);
+          return;
+        }
+        _lastEditorRenderTime = now;
+      }
+
       try {
       if (engine && !contextLost && !$outputFrozen) {
         // Use reactive $ subscriptions (persistent, no per-frame subscribe/unsubscribe)
@@ -905,23 +943,36 @@
     _knownLayerIds = liveIds;
   }
 
-  // Re-resize engine when project dimensions change (e.g., user picks 4K in settings)
+  // Re-resize engine when project dimensions change (e.g., user picks 4K in settings).
+  //
+  // The reactive `$:` fires on ANY change to the project store — layer
+  // adds, name edits, slider tweaks, the lot. Pre-guard this was running
+  // `engine.resize` + every shader/SVG render-target reallocation many
+  // times per second during normal interaction, blowing texture caches
+  // and stalling weak GPUs. Cache the last-applied dims and bail if
+  // they haven't changed.
+  let _lastResizeW: number | null = null;
+  let _lastResizeH: number | null = null;
   $: if (engine && $project.width && $project.height) {
     const pW = $project.width || 1920;
     const pH = $project.height || 1080;
-    // Re-calculate container size from wrapper layout dimensions (not affected by zoom transform)
-    if (wrapperEl && wrapperEl.offsetWidth > 0 && wrapperEl.offsetHeight > 0) {
-      sizeContainer(wrapperEl.offsetWidth, wrapperEl.offsetHeight);
-      engine.resize(pW, pH);
-      if (linesRenderer) linesRenderer.resize(pW, pH);
-      for (const svgRenderer of svgRenderers.values()) svgRenderer.resize(pW, pH);
-      for (const rt of svgRenderTargets.values()) rt.setSize(pW, pH);
-      // Resize shader render targets (scale by per-layer quality)
-      for (const [key, rt] of shaderRenderTargets.entries()) {
-        const quality = shaderRenderTargetQualities.get(key) ?? 1.0;
-        const rtW = Math.max(64, Math.round(pW * quality));
-        const rtH = Math.max(64, Math.round(pH * quality));
-        rt.setSize(rtW, rtH);
+    if (pW !== _lastResizeW || pH !== _lastResizeH) {
+      // Re-calculate container size from wrapper layout dimensions (not affected by zoom transform)
+      if (wrapperEl && wrapperEl.offsetWidth > 0 && wrapperEl.offsetHeight > 0) {
+        _lastResizeW = pW;
+        _lastResizeH = pH;
+        sizeContainer(wrapperEl.offsetWidth, wrapperEl.offsetHeight);
+        engine.resize(pW, pH);
+        if (linesRenderer) linesRenderer.resize(pW, pH);
+        for (const svgRenderer of svgRenderers.values()) svgRenderer.resize(pW, pH);
+        for (const rt of svgRenderTargets.values()) rt.setSize(pW, pH);
+        // Resize shader render targets (scale by per-layer quality)
+        for (const [key, rt] of shaderRenderTargets.entries()) {
+          const quality = shaderRenderTargetQualities.get(key) ?? 1.0;
+          const rtW = Math.max(64, Math.round(pW * quality));
+          const rtH = Math.max(64, Math.round(pH * quality));
+          rt.setSize(rtW, rtH);
+        }
       }
     }
   }
