@@ -557,13 +557,6 @@
     // the rest of the session with no indication to the user. With the guard,
     // bad frames are logged and skipped, next frame still schedules.
     let _consecutiveFrameErrors = 0;
-    // Editor render-rate cap. rAF on a high-refresh display runs at
-    // 120/144/165Hz — the editor renders at that rate, but the projector
-    // is almost always 60Hz so anything above 60 is wasted work. Users
-    // dial this from Settings → Performance: 0 = uncapped (default for
-    // capable hardware), or 60 / 30 to cap. Skips the render path on
-    // throttled frames but always reschedules rAF for input responsiveness.
-    let _lastEditorRenderTime = 0;
     function animate() {
       // Lightweight first-frame diagnostic for startup failures.
       if (!(window as any).__animTick) (window as any).__animTick = 0;
@@ -572,20 +565,6 @@
         console.log('[animate-tick] frame', (window as any).__animTick,
           'engine=', !!engine, 'contextLost=', contextLost, 'outputFrozen=', $outputFrozen,
           'outputWindowOpen=', $settings?.output?.outputWindowOpen, 'glCanvas=', !!glCanvas);
-      }
-
-      // Render-rate gate. Reschedule rAF unconditionally so input
-      // handlers (mousedown/mouseup/keydown) stay responsive; just
-      // bypass the render body when the cap says we're early.
-      const _editorFpsCap = ($settings as any)?.performance?.editorMaxFps ?? 0;
-      if (_editorFpsCap > 0) {
-        const now = performance.now();
-        const interval = 1000 / _editorFpsCap;
-        if (now - _lastEditorRenderTime < interval) {
-          animationId = requestAnimationFrame(animate);
-          return;
-        }
-        _lastEditorRenderTime = now;
       }
 
       try {

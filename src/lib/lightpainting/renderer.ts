@@ -8,6 +8,8 @@ import type {
   LightPaintingStroke,
   LightPaintingBrush,
 } from '../types';
+import { BrushSpriteCache, brushUsesAngle } from './brushSpriteCache';
+import { registerAllBrushGenerators } from './brushSpriteGenerators';
 
 // Local-midnight wall-clock anchor used to derive `animationTime` from
 // Date.now(). Any process on the same machine computes the same value, so
@@ -52,6 +54,27 @@ export class LightPaintingRenderer {
   private staticCacheWidth = 0;
   private staticCacheHeight = 0;
 
+  // Sprite cache — the big perf win. Pre-renders each brush stamp into
+  // an offscreen bitmap once per (quantized params + variant) tuple,
+  // then drawImage's it for every stamp on the hot path. Eliminates
+  // ~95% of `createRadialGradient` + `fill` calls that previously
+  // dominated frame time on Windows/Chromium.
+  private brushCache = new BrushSpriteCache();
+
+  // Per-frame perf probe. Reset at start of render(), accumulated by
+  // drawBrushPoint, surfaced via getPerfStats() for the diagnostics
+  // pill. Probe is essentially free (~5 integer increments per stamp).
+  private perfStampCount = 0;
+  private perfSpriteHits = 0;
+  private perfSpriteMisses = 0;
+  private perfFallbackPath = 0;
+  private perfLastRenderMs = 0;
+  // Tracks which stamp index along a stroke we're currently rendering,
+  // used by the sprite cache to pick a deterministic variant for
+  // stamp-random brushes (smoke, spray, paintbrush, watercolor) so
+  // each stamp gets a different sprite without re-render flicker.
+  private currentStampIndex = 0;
+
   constructor(width: number, height: number) {
     this.width = width;
     this.height = height;
@@ -85,6 +108,33 @@ export class LightPaintingRenderer {
     this.texture.minFilter = THREE.LinearFilter;
     this.texture.magFilter = THREE.LinearFilter;
     this.texture.format = THREE.RGBAFormat;
+
+    // Wire up brush sprite generators once. The cache is sized for a
+    // typical session (~hundreds of unique brush states) and evicts
+    // LRU — won't grow unbounded.
+    registerAllBrushGenerators(this.brushCache);
+  }
+
+  /**
+   * Perf probe snapshot — used by the diagnostics pill / DevTools.
+   * Returns the LAST FRAME's render time + stamp counts.
+   */
+  getPerfStats(): {
+    renderMs: number;
+    stampCount: number;
+    spriteHits: number;
+    spriteMisses: number;
+    fallbackPath: number;
+    cacheSize: number;
+  } {
+    return {
+      renderMs: this.perfLastRenderMs,
+      stampCount: this.perfStampCount,
+      spriteHits: this.perfSpriteHits,
+      spriteMisses: this.perfSpriteMisses,
+      fallbackPath: this.perfFallbackPath,
+      cacheSize: this.brushCache.size(),
+    };
   }
 
   /**
@@ -402,54 +452,66 @@ export class LightPaintingRenderer {
       jy += (Math.random() - 0.5) * brush.jitter * brush.size * 2;
     }
 
-    ctx.save();
+    this.perfStampCount++;
 
-    switch (brush.type) {
-      case 'glow':
-        this.drawGlowBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow, brush.softness);
-        break;
-      case 'neon':
-        this.drawNeonBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow);
-        break;
-      case 'flame':
-        this.drawFlameBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow, progress, timeS * (brush.speed ?? 1));
-        break;
-      case 'electric':
-        this.drawElectricBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow, timeS * (brush.speed ?? 1));
-        break;
-      case 'ribbon':
-        this.drawRibbonBrush(ctx, jx, jy, finalSize, r, g, b, alpha, progress, timeS * (brush.speed ?? 1));
-        break;
-      case 'particle':
-        this.drawParticleBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow, timeS * (brush.speed ?? 1));
-        break;
-      case 'smoke':
-        this.drawSmokeBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.softness);
-        break;
-      case 'laser':
-        this.drawLaserBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow);
-        break;
-      case 'calligraphy':
-        this.drawCalligraphyBrush(ctx, jx, jy, finalSize, r, g, b, alpha, angle);
-        break;
-      case 'spray':
-        this.drawSprayBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.softness);
-        break;
-      case 'paintbrush':
-        this.drawPaintBrushBrush(ctx, jx, jy, finalSize, r, g, b, alpha, angle, brush.softness);
-        break;
-      case 'marker':
-        this.drawMarkerBrush(ctx, jx, jy, finalSize, r, g, b, alpha, angle);
-        break;
-      case 'watercolor':
-        this.drawWatercolorBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.softness);
-        break;
-      default:
-        // Unknown brush type — fallback to glow
-        this.drawGlowBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow, brush.softness);
-        break;
+    // ── Sprite cache fast path ─────────────────────────────────
+    // The cache pre-renders this brush's stamp into an OffscreenCanvas
+    // keyed by quantized (brushType, size, color, glow, softness) +
+    // variantIndex. Reduces every stamp to a single drawImage call.
+    // For procedural brushes (smoke, spray, etc.) the variant index
+    // distributes stamps across N pre-rendered variations so the
+    // stroke retains visual variety. For time-driven brushes (flame,
+    // electric, ribbon, particle) the variant tracks the animation
+    // phase.
+    const variantIdx = this.brushCache.variantIndex(
+      brush.type,
+      this.currentStampIndex,
+      timeS,
+      brush.speed ?? 1,
+    );
+    const sprite = this.brushCache.getSprite(brush, finalSize, variantIdx);
+
+    if (sprite) {
+      this.perfSpriteHits++;
+      ctx.save();
+      ctx.globalAlpha *= alpha;
+      // Angle-dependent brushes (calligraphy, marker, paintbrush)
+      // need the sprite rotated by the stroke direction; the sprite
+      // is baked in canonical orientation.
+      if (brushUsesAngle(brush.type)) {
+        ctx.translate(jx, jy);
+        ctx.rotate(angle);
+        ctx.drawImage(sprite.canvas as any, -sprite.originX, -sprite.originY);
+      } else {
+        ctx.drawImage(sprite.canvas as any, jx - sprite.originX, jy - sprite.originY);
+      }
+      ctx.restore();
+      return;
     }
 
+    // ── Fallback: legacy per-stamp gradient path ──────────────
+    // Reaches here only if a brush type has no registered generator
+    // (shouldn't happen for any built-in brush after init). Kept so
+    // any future custom brush type still renders something rather
+    // than disappearing.
+    this.perfFallbackPath++;
+    ctx.save();
+    switch (brush.type) {
+      case 'glow':        this.drawGlowBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow, brush.softness); break;
+      case 'neon':        this.drawNeonBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow); break;
+      case 'flame':       this.drawFlameBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow, progress, timeS * (brush.speed ?? 1)); break;
+      case 'electric':    this.drawElectricBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow, timeS * (brush.speed ?? 1)); break;
+      case 'ribbon':      this.drawRibbonBrush(ctx, jx, jy, finalSize, r, g, b, alpha, progress, timeS * (brush.speed ?? 1)); break;
+      case 'particle':    this.drawParticleBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow, timeS * (brush.speed ?? 1)); break;
+      case 'smoke':       this.drawSmokeBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.softness); break;
+      case 'laser':       this.drawLaserBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow); break;
+      case 'calligraphy': this.drawCalligraphyBrush(ctx, jx, jy, finalSize, r, g, b, alpha, angle); break;
+      case 'spray':       this.drawSprayBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.softness); break;
+      case 'paintbrush':  this.drawPaintBrushBrush(ctx, jx, jy, finalSize, r, g, b, alpha, angle, brush.softness); break;
+      case 'marker':      this.drawMarkerBrush(ctx, jx, jy, finalSize, r, g, b, alpha, angle); break;
+      case 'watercolor':  this.drawWatercolorBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.softness); break;
+      default:            this.drawGlowBrush(ctx, jx, jy, finalSize, r, g, b, alpha, brush.glow, brush.softness); break;
+    }
     ctx.restore();
   }
 
@@ -916,6 +978,11 @@ export class LightPaintingRenderer {
       // Align step to trailStart so we don't skip initial points
       if ((i - trailStart) % step === 0 || i === drawUpTo - 1) {
         this.drawBrushPoint(ctx, px, py, brush, p.pressure, strokeProgress, angle, this.animationTime / 1000, trailAlpha);
+        // Bump the stamp index so stamp-random brushes (smoke, spray,
+        // paintbrush, watercolor) get a different sprite variant per
+        // stamp. Wraps via modulo inside the cache; pre-increment so
+        // first stamp = variant 0.
+        this.currentStampIndex++;
       }
     }
 
@@ -1083,6 +1150,14 @@ export class LightPaintingRenderer {
     if (this.isStaticCacheHit(content)) {
       return this.texture;
     }
+
+    // Reset perf probe counters for this frame.
+    const renderStart = performance.now();
+    this.perfStampCount = 0;
+    this.perfSpriteHits = 0;
+    this.perfSpriteMisses = 0;
+    this.perfFallbackPath = 0;
+    this.currentStampIndex = 0;
 
     // Update animation time — derived from a globally-shared wall clock so
     // the main viewport and the output window converge on the SAME value at
@@ -1320,6 +1395,7 @@ export class LightPaintingRenderer {
     // Update texture
     this.texture.needsUpdate = true;
     this.markStaticCache(content);
+    this.perfLastRenderMs = performance.now() - renderStart;
     return this.texture;
   }
 

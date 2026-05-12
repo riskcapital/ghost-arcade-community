@@ -697,24 +697,6 @@
         </section>
 
         <section class="settings-section">
-          <h3>Editor Render</h3>
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="label-text">Editor Frame Rate Cap</span>
-              <span class="label-hint">
-                Limits how many frames per second the editor renders. Projectors are almost always 60Hz — rendering at 120/144/165 Hz on a high-refresh monitor is wasted GPU. Cap to 60 to free up budget. Input remains responsive regardless. Applies to mapping mode too.
-              </span>
-            </div>
-            <select value={String($settings.performance.editorMaxFps)}
-              onchange={(e) => settings.update(s => ({ ...s, performance: { ...s.performance, editorMaxFps: parseInt((e.target as HTMLSelectElement).value) as 0 | 30 | 60 } }))}>
-              <option value="0">Uncapped (match display)</option>
-              <option value="60">60 fps</option>
-              <option value="30">30 fps</option>
-            </select>
-          </div>
-        </section>
-
-        <section class="settings-section">
           <h3>VJ Preview</h3>
           <div class="setting-row">
             <div class="setting-label">

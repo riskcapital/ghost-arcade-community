@@ -454,13 +454,9 @@ export interface PerformanceSettings {
    */
   outputCodecPreference: 'auto' | 'h264' | 'vp8';
   /**
-   * Maximum frame rate for the editor's render loop. 0 = uncapped
-   * (default — runs at the display's refresh rate). Cap to match
-   * your projector's refresh (typically 60) to stop the editor
-   * burning GPU cycles on frames the projector can't show. Especially
-   * important on high-refresh monitors (120/144/165Hz) where uncapped
-   * means 2-3× the render work for no visible benefit. Input handlers
-   * stay responsive regardless of the cap.
+   * Retained only for backward compatibility with older saved settings.
+   * The editor render loop now follows requestAnimationFrame directly
+   * because manual caps produced worse frame pacing on some machines.
    */
   editorMaxFps: 0 | 30 | 60;
 }
@@ -608,7 +604,7 @@ function createDefaultSettings(): AppSettings {
       outputMaxBitrate: 80_000_000,   // 80 Mbps
       outputDegradationPreference: 'maintain-resolution',
       outputCodecPreference: 'auto',
-      editorMaxFps: 0,                // 0 = uncapped (match rAF / refresh rate)
+      editorMaxFps: 0,                // legacy, reset to uncapped on load
     },
   };
 }
@@ -728,6 +724,11 @@ function loadSettings(): AppSettings {
           ...(parsed.performance || {}),
         },
       };
+
+      // The editor FPS cap was removed from the UI because it often made
+      // frame pacing feel worse than uncapped rAF. Reset any persisted
+      // value so older installs do not keep a hidden throttle.
+      settings.performance.editorMaxFps = 0;
 
       // Clean up legacy keys after migration
       if (legacyClaude) localStorage.removeItem('ai_claude_key');
