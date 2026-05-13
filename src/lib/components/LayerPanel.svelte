@@ -1523,7 +1523,13 @@
               Enable Mask
             </label>
             <span class="mask-point-count">
-              {layer.mask?.points?.length ?? 0} points
+              {#if layer.mask?.shapes}
+                {@const totalShapes = layer.mask.shapes.length}
+                {@const totalPoints = layer.mask.shapes.reduce((acc, s) => acc + s.points.length, 0)}
+                {totalPoints} points · {totalShapes} {totalShapes === 1 ? 'shape' : 'shapes'}
+              {:else}
+                0 points · 0 shapes
+              {/if}
             </span>
           </div>
 
@@ -1552,11 +1558,36 @@
               <span class="value">{((layer.mask?.feather ?? 0) * 100).toFixed(0)}%</span>
             </div>
 
+            <!-- Per-shape list with delete buttons. Closed = solid swatch,
+                 open = dashed. Click the × to delete the entire sub-polygon. -->
+            {#if (layer.mask?.shapes?.length ?? 0) > 0}
+              <div class="mask-shape-list">
+                {#each layer.mask.shapes as shape, sIdx}
+                  <div class="mask-shape-row">
+                    <span class="mask-shape-swatch" class:open={!shape.closed} aria-hidden="true"></span>
+                    <span class="mask-shape-label">
+                      Shape {sIdx + 1}
+                      <span class="mask-shape-meta">
+                        · {shape.points.length} pt{shape.points.length === 1 ? '' : 's'}
+                        {#if !shape.closed}· <em>open</em>{/if}
+                      </span>
+                    </span>
+                    <button
+                      class="mask-shape-delete"
+                      title="Delete this shape"
+                      onclick={() => project.removeMaskShape(layer.id, sIdx)}
+                      aria-label="Delete shape {sIdx + 1}"
+                    >×</button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+
             <div class="property-row mask-actions">
               <button class="btn-secondary" onclick={() => project.clearMask(layer.id)}>
-                Clear Points
+                Clear All
               </button>
-              <span class="mask-hint">Click canvas to add mask points</span>
+              <span class="mask-hint">Click to add points · Click+drag for curves · Click first point or right-click empty area to close · Right-click anchor to delete</span>
             </div>
 
             <div class="property-row mask-done">
@@ -4080,14 +4111,78 @@
     cursor: pointer;
   }
 
-  .mask-actions .btn-secondary:hover {
+  .mask-actions .btn-secondary:hover:not(:disabled) {
     background: #555;
+  }
+
+  .mask-actions .btn-secondary:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 
   .mask-hint {
     font-size: 10px;
     color: #666;
     font-style: italic;
+  }
+
+  .mask-shape-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 6px 0 8px;
+    padding: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 4px;
+  }
+  .mask-shape-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border-radius: 3px;
+    background: rgba(255, 0, 255, 0.06);
+    border: 1px solid rgba(255, 0, 255, 0.2);
+  }
+  .mask-shape-swatch {
+    width: 12px; height: 12px;
+    border-radius: 3px;
+    background: #ff00ff;
+    flex-shrink: 0;
+  }
+  .mask-shape-swatch.open {
+    background: transparent;
+    border: 1.5px dashed #ff00ff;
+  }
+  .mask-shape-label {
+    flex: 1;
+    font-size: 11px;
+    color: #ddd;
+  }
+  .mask-shape-meta {
+    color: #888;
+    font-size: 10px;
+  }
+  .mask-shape-meta em {
+    color: #ffd400;
+    font-style: normal;
+    font-weight: 600;
+  }
+  .mask-shape-delete {
+    background: transparent;
+    border: 1px solid #555;
+    color: #aaa;
+    width: 22px; height: 22px;
+    border-radius: 3px;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .mask-shape-delete:hover {
+    background: #2a1414;
+    border-color: #844;
+    color: #f88;
   }
 
   .mask-done {

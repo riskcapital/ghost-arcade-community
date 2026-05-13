@@ -404,9 +404,21 @@ export interface ColorContent {
 }
 
 // Click-point mask configuration
+//
+// A mask is a UNION of one-or-more sub-polygons ("shapes"). Each shape is an
+// array of bezier anchor points (Illustrator-style: each anchor may carry
+// `cpIn` / `cpOut` control handles to define curved segments). At least 3
+// anchors are required for a shape to render; `closed` flips once the user
+// finishes drawing it. The rasterizer tessellates each closed shape's beziers
+// in JS, then unions the silhouettes.
+export interface MaskShape {
+  points: BezierPoint[];   // Normalized coordinates (0-1) with optional bezier handles
+  closed: boolean;         // True once the user has closed this sub-polygon
+}
+
 export interface MaskConfig {
   enabled: boolean;
-  points: Point2D[];   // Normalized coordinates (0-1)
+  shapes: MaskShape[]; // Multiple sub-polygons; final mask is the UNION
   inverted: boolean;   // If true, show outside mask, hide inside
   feather: number;     // Feather/softness at edges (0-1)
 }
