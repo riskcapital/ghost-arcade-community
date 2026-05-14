@@ -382,6 +382,8 @@ const standardFragmentShader = `
   uniform float ambientIntensity;
   uniform float directionalIntensity;
   uniform float time;
+  uniform sampler2D diffuseMap;
+  uniform int useDiffuseMap;
 
   varying vec3 vPosition;
   varying vec3 vNormal;
@@ -392,13 +394,18 @@ const standardFragmentShader = `
   void main() {
     vec3 normal = normalize(vNormal);
     vec3 light = normalize(lightDir);
+    vec4 baseSample = vec4(baseColor, 1.0);
+    if (useDiffuseMap == 1) {
+      baseSample = texture2D(diffuseMap, vUv);
+    }
+    vec3 surfaceColor = baseSample.rgb;
 
     // Simple PBR-like shading
     float NdotL = max(dot(normal, light), 0.0);
-    vec3 diffuse = baseColor * NdotL * lightColor * directionalIntensity;
+    vec3 diffuse = surfaceColor * NdotL * lightColor * directionalIntensity;
 
     // Ambient (driven by panel slider — was hard-coded 0.3 before).
-    vec3 ambient = baseColor * ambientIntensity;
+    vec3 ambient = surfaceColor * ambientIntensity;
 
     // Emissive
     vec3 emissive = emissiveColor * emissiveIntensity;
@@ -408,7 +415,7 @@ const standardFragmentShader = `
 
     vec3 color = ambient + diffuse + emissive;
 
-    gl_FragColor = vec4(color, opacity);
+    gl_FragColor = vec4(color, opacity * baseSample.a);
   }
 `;
 
@@ -953,6 +960,8 @@ export class Model3DRenderer {
         let meshIndex = 0;
         this.model.traverse((child) => {
           if (child instanceof THREE.Mesh) {
+            this.rememberEmbeddedMaterialMaps(child);
+
             const geometry = child.geometry;
             const positions = geometry.attributes.position.array as Float32Array;
             const normals = geometry.attributes.normal?.array as Float32Array || new Float32Array(positions.length);
@@ -1197,6 +1206,41 @@ export class Model3DRenderer {
     return this._lightColorScratch;
   }
 
+  private getEmbeddedBaseColorTexture(material: THREE.Material | THREE.Material[] | null | undefined): THREE.Texture | null {
+    if (!material) return null;
+    const materials = Array.isArray(material) ? material : [material];
+    for (const mat of materials) {
+      const map = (mat as THREE.MeshStandardMaterial | THREE.MeshBasicMaterial).map;
+      if (map) return map;
+    }
+    return null;
+  }
+
+  private rememberEmbeddedMaterialMaps(mesh: THREE.Mesh) {
+    const baseColorTexture = this.getEmbeddedBaseColorTexture(mesh.material);
+    mesh.userData.embeddedBaseColorTexture = baseColorTexture;
+
+    if (baseColorTexture) {
+      baseColorTexture.colorSpace = THREE.SRGBColorSpace;
+      baseColorTexture.needsUpdate = true;
+    }
+  }
+
+  private applyEmbeddedTextureUniforms(mesh: THREE.Mesh, material: THREE.Material, materialType: Model3DMaterialType) {
+    if (!(material instanceof THREE.ShaderMaterial)) return;
+
+    const useEmbeddedBaseColor =
+      (materialType === 'standard' || materialType === 'toon') &&
+      mesh.userData.embeddedBaseColorTexture instanceof THREE.Texture;
+
+    if (material.uniforms.diffuseMap) {
+      material.uniforms.diffuseMap.value = useEmbeddedBaseColor ? mesh.userData.embeddedBaseColorTexture : null;
+    }
+    if (material.uniforms.useDiffuseMap) {
+      material.uniforms.useDiffuseMap.value = useEmbeddedBaseColor ? 1 : 0;
+    }
+  }
+
   // Get morph type index
   private getMorphTypeIndex(type: Model3DDeformationType): number {
     // Maps the user-facing deformation name to the morph index used by the vertex shader.
@@ -1254,6 +1298,8 @@ export class Model3DRenderer {
       directionalIntensity: { value: content.directionalIntensity ?? 1.0 },
       lightDir: { value: lightDirVec },
       lightColor: { value: lightColorVec },
+      diffuseMap: { value: null as THREE.Texture | null },
+      useDiffuseMap: { value: 0 },
     };
 
     switch (content.materialType) {
@@ -1580,7 +1626,9 @@ export class Model3DRenderer {
               child.material.dispose();
             }
           }
-          child.material = this._cachedMaterial!.clone();
+          const material = this._cachedMaterial!.clone();
+          this.applyEmbeddedTextureUniforms(child, material, content.materialType);
+          child.material = material;
         }
       });
     }
