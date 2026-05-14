@@ -39,6 +39,7 @@
   import SplatPanel from './SplatPanel.svelte';
   import Model3DPanel from './Model3DPanel.svelte';
   import { createSharedMediaUrl, getPathForFile, shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
+  import { setCleanDragPreview } from '../utils/dragPreview';
 
   // File menu callback (wired by parent App.svelte)
   export let onFileAction: ((action: 'new' | 'open' | 'save' | 'saveAs' | 'importPresets' | 'loadDemo' | 'undo' | 'redo') => void) | null = null;
@@ -863,6 +864,8 @@
       e.dataTransfer.effectAllowed = 'copy';
       e.dataTransfer.setData('text/plain', JSON.stringify(clip));
     }
+    // Single-frame clean drag image — kills the multi-ghost trail.
+    setCleanDragPreview(e, e.currentTarget as HTMLElement);
   }
 
   function handleDragEnd() {
@@ -1079,13 +1082,26 @@
     e.preventDefault();
     dragOverCell = null;
 
-    // Cell-to-cell move
+    // Cell-to-cell move OR swap. Resolume-style behavior: if the
+    // destination cell is empty, move the source clip into it (clearing
+    // the source). If the destination cell ALREADY has a clip, SWAP the
+    // two — neither clip is destroyed, they just trade places. This is
+    // what users expect when dragging clips between layers in the grid;
+    // the previous "always replace" behavior was nuking work mid-set.
     if (dragSourceCell) {
       const srcClip = $vjClipLauncher.clipGrid[dragSourceCell.layer]?.[dragSourceCell.column];
+      const destClip = $vjClipLauncher.clipGrid[layerIndex]?.[columnIndex];
       if (srcClip && (dragSourceCell.layer !== layerIndex || dragSourceCell.column !== columnIndex)) {
         const movedClip: VJClip = { ...srcClip, id: generateUUID() };
         vjClipLauncher.setClip(layerIndex, columnIndex, movedClip);
-        vjClipLauncher.clearClip(dragSourceCell.layer, dragSourceCell.column);
+        if (destClip) {
+          // Dest had a clip → swap it back to the source slot.
+          const swappedClip: VJClip = { ...destClip, id: generateUUID() };
+          vjClipLauncher.setClip(dragSourceCell.layer, dragSourceCell.column, swappedClip);
+        } else {
+          // Dest was empty → clear the source (true move semantics).
+          vjClipLauncher.clearClip(dragSourceCell.layer, dragSourceCell.column);
+        }
       }
       dragSourceCell = null;
       draggedClip = null;

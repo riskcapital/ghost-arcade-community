@@ -5,6 +5,8 @@
   import type { MediaSource, JSAnimationSource } from '../types';
   import { generateUUID } from '../types';
   import { createSharedMediaUrl, shouldUseAnonymousCrossOrigin } from '../utils/localAsset';
+  import { setCleanDragPreview } from '../utils/dragPreview';
+  import { confirmDeleteIfSafeMode } from '../utils/safeMode';
   import AIShaderGenerator from './AIShaderGenerator.svelte';
 
   // Library state
@@ -159,8 +161,12 @@
     }
   }
 
-  function removeFromLibrary(id: string) {
+  async function removeFromLibrary(id: string, event?: MouseEvent) {
     const item = libraryItems.find(i => i.id === id);
+    // Safe Mode: confirm before nuking media-library entries. The × is
+    // tiny and easy to misclick when scanning thumbnails. The click event
+    // is passed through so the in-app popover anchors right at the ×.
+    if (!(await confirmDeleteIfSafeMode(item ? `"${item.name}" from the media library` : 'this media item', event))) return;
     if (item) {
       URL.revokeObjectURL(item.src);
       if (item.videoElement) {
@@ -265,6 +271,10 @@
       e.dataTransfer.effectAllowed = 'copy';
       e.dataTransfer.setData('application/json', JSON.stringify({ type: 'threejs-item', id: item.id, src: item.src, name: item.name }));
     }
+    // Single-frame clean drag image — kills the multi-ghost trail
+    // Chromium otherwise paints when source elements have CSS animations
+    // or hover effects active during drag.
+    setCleanDragPreview(e, e.currentTarget as HTMLElement);
   }
 
   function handleThreeJSDragEnd() {
@@ -278,6 +288,7 @@
       e.dataTransfer.effectAllowed = 'copy';
       e.dataTransfer.setData('application/json', JSON.stringify({ type: 'library-item', id: item.id }));
     }
+    setCleanDragPreview(e, e.currentTarget as HTMLElement);
   }
 
   function handleItemDragEnd() {
@@ -401,6 +412,7 @@
         name: item.name
       }));
     }
+    setCleanDragPreview(e, e.currentTarget as HTMLElement);
   }
 
   function handleJSDragEnd() {
@@ -605,7 +617,7 @@
             <div class="item-type-badge">{item.jsAnimation?.animationType === 'threejs' ? '3JS' : 'P5'}</div>
             <button
               class="btn-remove"
-              onclick={(e) => { e.stopPropagation(); removeFromLibrary(item.id); }}
+              onclick={(e) => { e.stopPropagation(); removeFromLibrary(item.id, e); }}
               title="Remove from library"
             >
               ×
@@ -669,7 +681,7 @@
             <div class="item-name">{item.name}</div>
             <button
               class="btn-remove"
-              onclick={(e) => { e.stopPropagation(); removeFromLibrary(item.id); }}
+              onclick={(e) => { e.stopPropagation(); removeFromLibrary(item.id, e); }}
               title="Remove from library"
             >
               ×
